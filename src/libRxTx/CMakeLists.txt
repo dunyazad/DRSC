@@ -1,0 +1,31 @@
+project(RxTx LANGUAGES CXX)
+
+file(GLOB LIB_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
+)
+file(GLOB LIB_HEADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../inc/RxTx/*.h
+)
+
+add_library(RxTx SHARED
+    ${LIB_SOURCES}
+    ${LIB_HEADERS}
+)
+
+target_include_directories(RxTx PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../inc
+)
+
+target_compile_definitions(RxTx PRIVATE RXTX_EXPORTS)
+
+# DLL + LIB 각각 출력 위치 지정
+set_target_properties(RxTx PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_CURRENT_SOURCE_DIR}/../../bin/Debug
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../bin/Release
+    ARCHIVE_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/Debug
+    ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/Release
+    LIBRARY_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/Debug
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/Release
+)
+
+message(STATUS "Building RxTx → bin/lib 구조 적용 완료")
