@@ -120,7 +120,7 @@ int main() {
         {
             std::stringstream ss;
             ss << "[" << client.clientId_ << "] THROTTLE_UP";
-            // client.controlMessagesTCP.SendString(ss.str());
+            client.controlMessagesTCP.SendString(ss.str());
             // std::cout << ss.str() << std::endl;
         }
 
