@@ -32,9 +32,8 @@ class Match : public std::enable_shared_from_this<Match> {
 public:
     explicit Match(int id) : matchId(id) {}
 
-    // ★ FIX: 소멸자에서 스레드 join
     ~Match() {
-        Stop(); // 스레드 루프가 종료되도록 보장
+        Stop();
         if (thread.joinable()) {
             thread.join();
         }
@@ -49,7 +48,6 @@ public:
             << " (" << s->clientId << ")" << std::endl;
     }
 
-    // ★ FIX: Use-After-Free 방지를 위해 shared_from_this 사용
     void Start() {
         if (running) return;
         running = true;
@@ -60,7 +58,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(playerMutex);
             for (auto& p : players) {
-                if (p) { // weak_ptr가 아니므로 항상 유효 (서버 세션이 살아있는 한)
+                if (p) {
                     if (sendCallback) sendCallback("START_RACE", p->clientId);
                 }
             }
@@ -68,16 +66,14 @@ public:
 
         if (thread.joinable()) thread.join();
 
-        // ★ FIX: 람다에 this 대신 shared_ptr 캡처
         auto self = shared_from_this();
         thread = std::thread([self]() { self->Loop(); });
     }
 
     void Loop() {
-        while (running) { // running은 atomic
+        while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-            // ★ FIX: player list 접근을 thread-safe하게
             int playerCount = 0;
             {
                 std::lock_guard<std::mutex> lock(playerMutex);
@@ -85,19 +81,18 @@ public:
             }
 
             if (playerCount <= 1) {
-                if (running) { // 중복 Stop 방지
+                if (running) {
                     std::cout << "[Match " << matchId << "] Auto-stop: " << playerCount << " player(s) left.\n";
-                    Stop(); // running = false 설정, 루프 다음 턴에 탈출
+                    Stop();
                 }
             }
         }
         std::cout << "[Match " << matchId << "] Loop exited.\n";
     }
 
-    // ★ FIX: Non-blocking Stop. sleep/join 제거
     void Stop() {
-        if (!running.exchange(false)) { // atomic하게 false로 설정하고 이전 값 확인
-            return; // 이미 Stop이 호출됨
+        if (!running.exchange(false)) {
+            return;
         }
 
         std::cout << "[Match " << matchId << "] Stopping..." << std::endl;
@@ -113,7 +108,6 @@ public:
                 }
             }
         }
-        // ★ FIX: sleep/join 제거. 루프는 running 플래그 보고 스스로 종료.
     }
 
     bool IsRunning() const { return running; }
@@ -134,7 +128,6 @@ public:
 
     int GetId() const { return matchId; }
 
-    // playerMutex는 friend class만 접근 가능하도록
     friend class DroneRacingServer;
 
     std::function<void(const std::string&, const std::string&)> sendCallback;
@@ -143,7 +136,6 @@ private:
     int matchId;
     std::atomic<bool> running = false;
 
-    // ★ FIX: 뮤텍스로 보호
     mutable std::mutex playerMutex;
     std::vector<std::shared_ptr<Session>> players;
 

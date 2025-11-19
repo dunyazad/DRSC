@@ -12,7 +12,7 @@ class DroneRacingClient {
 public:
     DroneRacingClient()
         : beaconUDP(Protocol::UDP), controlMessagesTCP(Protocol::TCP),
-        clientRunning_(true) // ★ FIX: 클라이언트 실행 플래그
+        clientRunning_(true)
     {
     }
 
@@ -29,7 +29,6 @@ public:
 
             std::string serverIp = msg.substr(pos + 1);
 
-            // ★ FIX: 이 플래그가 재연결을 막아줌
             if (tcpConnecting_ || tcpConnected_) return;
             tcpConnecting_ = true;
 
@@ -62,40 +61,35 @@ public:
                         std::cout << "[Client] Race finished. Shutting down..." << std::endl;
                         raceStarted_ = false;
 
-                        // ★ FIX: 데드락 방지
+                        // FIX: 데드락 방지
                         // controlMessagesTCP.Stop(); // 여기서 호출 금지!
                         // beaconUDP.Stop();          // 여기서 호출 금지!
                         clientRunning_ = false;    // 메인 스레드에 종료 신호
                     }
                 });
 
-                // ★ FIX: 재연결 로직
                 controlMessagesTCP.OnDisconnect([this](const std::string& remoteIp) {
                     std::cout << "[TCP Disconnected from " << remoteIp << "]" << std::endl;
                     tcpConnected_ = false;
                     tcpConnecting_ = false;
                     raceStarted_ = false;
                     clientId_ = "";
-                    // beaconUDP가 계속 실행 중이므로, OnReceive가 다시 서버를 찾을 것임
                     });
 
-                // TCP 연결 시도
                 if (controlMessagesTCP.Connect(serverIp, 6000)) {
                     tcpConnected_ = true;
                     controlMessagesTCP.Start();
                     std::cout << "[Client] TCP connection established with " << serverIp << std::endl;
 
-                    // ★ FIX: 비콘을 멈추지 않음! (재연결을 위해)
                     // beaconUDP.Stop();
                 }
                 else {
                     std::cout << "[Client] TCP connection failed to " << serverIp << std::endl;
-                    // ★ FIX: 실패 시 Stop() 호출 (소켓 정리)
                     controlMessagesTCP.Close();
                 }
 
                 tcpConnecting_ = false;
-                }).detach(); // 연결 스레드는 분리
+                }).detach();
             });
 
         beaconUDP.Start();
@@ -107,7 +101,7 @@ public:
     std::atomic<bool> tcpConnecting_ = false;
     std::atomic<bool> tcpConnected_ = false;
     std::atomic<bool> raceStarted_ = false;
-    std::atomic<bool> clientRunning_; // ★ FIX
+    std::atomic<bool> clientRunning_;
     std::string clientId_;
 };
 
@@ -115,7 +109,7 @@ int main() {
     DroneRacingClient client;
     client.StartBeaconListener();
 
-    while (client.clientRunning_) { // ★ FIX
+    while (client.clientRunning_) {
         if (client.tcpConnected_ && client.raceStarted_)
         {
             std::stringstream ss;
