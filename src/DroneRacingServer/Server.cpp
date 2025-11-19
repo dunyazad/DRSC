@@ -46,6 +46,8 @@ public:
         std::cout << "[Match " << matchId << "] Added player: "
             << (s->playerName.empty() ? "(unknown)" : s->playerName)
             << " (" << s->clientId << ")" << std::endl;
+
+		sendCallback("USER_INDEX|" + std::to_string(players.size() - 1), s->clientId);
     }
 
     void Start() {
@@ -173,13 +175,12 @@ private:
     RxTx beaconUDP;
     RxTx receptionTCP;
 
-    std::unordered_map<std::string, std::shared_ptr<Session>> sessions; // key = clientId
-    std::mutex mtx; // sessions, matches 리스트 보호
+    std::unordered_map<std::string, std::shared_ptr<Session>> sessions;
+    std::mutex mtx;
     std::atomic<int> nextClientId{ 1 };
     std::vector<std::shared_ptr<Match>> matches;
     int nextMatchId = 1;
 
-    // ... Beacon (UDP) ...
     void StartBeacon() {
         beaconUDP.Start();
         std::thread([this]() {
@@ -188,21 +189,15 @@ private:
                 auto message = "DRONE_RACING_SERVER_IP:" + ip;
                 beaconUDP.SendToAll(message, 5000);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
-
-                // (참고) 실제로는 beaconUDP.running_ 플래그를 확인해야 함
-                //      (Stop()을 위해)
-                //      간결성을 위해 생략.
             }
             }).detach();
     }
 
-    // ... TCP 서버 ...
     void StartTCP() {
         receptionTCP.Init();
         receptionTCP.Bind(6000);
         receptionTCP.Listen();
 
-        // 클라이언트 연결 시
         receptionTCP.OnConnect([this](const std::string& ip) {
             std::lock_guard<std::mutex> lock(mtx);
             auto session = std::make_shared<Session>();
@@ -214,21 +209,18 @@ private:
 
             sessions[session->clientId] = session;
 
-            // ★ 중요: RxTx가 IP->ID를 매핑할 수 있도록 등록
             receptionTCP.MapClientIpToId(ip, session->clientId);
-            // ★ 중요: RxTx가 소켓 키를 IP에서 ID로 변경하도록 등록
             receptionTCP.RegisterClientSocket(session->clientId, ip);
 
             std::cout << "[TCP] Connected: " << ip
                 << " -> ClientID=" << session->clientId << std::endl;
 
-            return "CLIENT_ID:" + session->clientId;
+            return "CLIENT_ID|" + session->clientId;
             });
 
-        receptionTCP.OnReceive([this](const std::string& msg, const std::string& clientId) { // 이제 IP가 아닌 ID가 넘어옴
+        receptionTCP.OnReceive([this](const std::string& msg, const std::string& clientId) {
             std::lock_guard<std::mutex> lock(mtx);
 
-            // ★ FIX: 이제 RxTx가 ID를 찾아주므로 GetMappedClientId 필요 없음
             auto session = FindSessionById(clientId);
             if (!session) {
                 std::cout << "[TCP] Received from unknown ID: " << clientId << std::endl;
@@ -237,9 +229,11 @@ private:
 
             std::cout << "[TCP " << clientId << "] " << msg << std::endl;
 
-            if (msg.rfind("JOIN:", 0) == 0) {
-                session->playerName = clientId; // (임시)
+            if (msg.rfind("JOIN", 0) == 0) {
+                session->playerName = clientId;
                 AssignToMatch(session);
+
+				receptionTCP.SendToClient(clientId, "JOINED_MATCH");
             }
             else if (msg.rfind("READY:", 0) == 0) {
                 session->ready = true;
@@ -252,11 +246,9 @@ private:
             }
             });
 
-        // ★ FIX: Non-blocking OnDisconnect
-        receptionTCP.OnDisconnect([this](const std::string& clientId) { // 이제 IP가 아닌 ID가 넘어옴
+        receptionTCP.OnDisconnect([this](const std::string& clientId) {
             std::lock_guard<std::mutex> lock(mtx);
 
-            // ★ FIX: ID가 넘어오므로 매핑 불필요
             auto session = FindSessionById(clientId);
             if (!session) {
                 std::cout << "[TCP] Disconnected unknown ID: " << clientId << std::endl;
@@ -265,13 +257,11 @@ private:
 
             std::cout << "[TCP] Disconnected: " << clientId << std::endl;
 
-            // 서버의 세션 리스트에서 즉시 제거
             sessions.erase(clientId);
 
             auto match = session->currentMatch.lock();
-            if (!match) return; // 매치에 속하지 않았음
+            if (!match) return;
 
-            // 매치에서 해당 플레이어 제거 (Thread-safe)
             bool wasRemoved = false;
             {
                 std::lock_guard<std::mutex> lock(match->playerMutex);
@@ -290,7 +280,7 @@ private:
             if (wasRemoved)
                 std::cout << "[Match " << match->GetId() << "] Removed player " << clientId << std::endl;
 
-            // ★ FIX: 여기서 match->Stop()을 절대 호출하지 않음!
+            // FIX: 여기서 match->Stop()을 절대 호출하지 않음!
             // Match::Loop()가 플레이어 수 감소를 감지하고 스스로 중지할 것임.
 
             // 매치가 비었고 + 실행 중이지 않으면 리스트에서 제거
@@ -316,7 +306,6 @@ private:
         return nullptr;
     }
 
-    // ... Match 관리 ...
     void AssignToMatch(std::shared_ptr<Session> s) {
         auto openMatch = FindOpenMatch();
         if (!openMatch) {
@@ -346,13 +335,12 @@ private:
     }
 };
 
-// ... main() ...
 int main() {
     DroneRacingServer server;
     server.Start();
 
     std::cout << "Server started. Press Enter to exit...\n";
-    std::cin.get(); // Enter 키 입력 시 종료
+    std::cin.get();
 
     server.Stop();
     std::cout << "Server shutting down.\n";
