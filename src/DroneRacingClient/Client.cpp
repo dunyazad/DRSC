@@ -42,14 +42,14 @@ public:
                 controlMessagesTCP.OnReceive([this](const std::string& msg, const std::string& remoteIp) {
                     std::cout << "[TCP Received] " << msg << std::endl;
 
-                    if (msg.rfind("CLIENT_ID:", 0) == 0) {
+                    if (msg.rfind("CLIENT_ID|", 0) == 0) {
                         clientId_ = msg.substr(10);
                         std::cout << "[Client] Assigned ID: " << clientId_ << std::endl;
 
                         if (!clientId_.empty()) {
-                            controlMessagesTCP.SendString("JOIN:" + clientId_);
+                            controlMessagesTCP.SendString("JOIN|" + clientId_);
                             std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                            controlMessagesTCP.SendString("READY:" + clientId_);
+                            controlMessagesTCP.SendString("READY|" + clientId_);
                             std::cout << "[Client] Sent JOIN and READY for " << clientId_ << std::endl;
                         }
                     }

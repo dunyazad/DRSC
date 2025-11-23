@@ -47,7 +47,7 @@ public:
             << (s->playerName.empty() ? "(unknown)" : s->playerName)
             << " (" << s->clientId << ")" << std::endl;
 
-		sendCallback("USER_INDEX|" + std::to_string(players.size() - 1), s->clientId);
+		sendCallback("PLAYER_INDEX|" + std::to_string(players.size() - 1), s->clientId);
     }
 
     void Start() {
@@ -57,14 +57,14 @@ public:
         std::cout << "[Match " << matchId << "] Race started with "
             << players.size() << " players." << std::endl;
 
-        {
+  /*      {
             std::lock_guard<std::mutex> lock(playerMutex);
             for (auto& p : players) {
                 if (p) {
-                    if (sendCallback) sendCallback("START_RACE", p->clientId);
+                    if (sendCallback) sendCallback("START_RACE|", p->clientId);
                 }
             }
-        }
+        }*/
 
         if (thread.joinable()) thread.join();
 
@@ -75,6 +75,53 @@ public:
     void Loop() {
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+            if (0 <= countdown)
+            {
+                std::cout << "[Match " << matchId << "] Countdown: " << countdown << " seconds remaining.\n";
+                {
+                    std::lock_guard<std::mutex> lock(playerMutex);
+                    for (auto& p : players) {
+                        if (p) {
+                            if (sendCallback) {
+                                sendCallback("COUNT_DOWN|" + std::to_string(countdown), p->clientId);
+                            }
+                        }
+                    }
+                }
+                countdown--;
+				continue;
+            }
+            if (-1 == countdown)
+            {
+                startTime = std::chrono::steady_clock::now();
+
+                std::lock_guard<std::mutex> lock(playerMutex);
+                for (auto& p : players) {
+                    if (p) {
+                        if (sendCallback) {
+                            sendCallback("START_RACE|", p->clientId);
+                        }
+                    }
+                }
+                countdown--;
+            }
+
+            if (-2 == countdown)
+            {
+				auto delta = std::chrono::steady_clock::now() - startTime;
+                playTime = std::chrono::duration_cast<std::chrono::milliseconds>(delta).count();
+                {
+					std::lock_guard<std::mutex> lock(playerMutex);
+                    for (auto& p : players) {
+                        if (p) {
+                            if (sendCallback) {
+                                sendCallback("PLAY_TIME|" + std::to_string(playTime), p->clientId);
+                            }
+                        }
+                    }
+                }
+            }
 
             int playerCount = 0;
             {
@@ -128,7 +175,7 @@ public:
         return true;
     }
 
-    int GetId() const { return matchId; }
+    int GetID() const { return matchId; }
 
     friend class DroneRacingServer;
 
@@ -137,6 +184,9 @@ public:
 private:
     int matchId;
     std::atomic<bool> running = false;
+	int countdown = 5;
+    std::chrono::time_point<std::chrono::steady_clock> startTime;
+    long long playTime;
 
     mutable std::mutex playerMutex;
     std::vector<std::shared_ptr<Session>> players;
@@ -233,9 +283,11 @@ private:
                 session->playerName = clientId;
                 AssignToMatch(session);
 
-				receptionTCP.SendToClient(clientId, "JOINED_MATCH");
+                std::stringstream ss;
+				ss << "JOINED_MATCH|" << session->currentMatch.lock()->GetID();
+				receptionTCP.SendToClient(clientId, ss.str());
             }
-            else if (msg.rfind("READY:", 0) == 0) {
+            else if (msg.rfind("READY|", 0) == 0) {
                 session->ready = true;
                 std::cout << "[TCP] " << session->clientId << " is READY" << std::endl;
 
@@ -278,7 +330,7 @@ private:
             }
 
             if (wasRemoved)
-                std::cout << "[Match " << match->GetId() << "] Removed player " << clientId << std::endl;
+                std::cout << "[Match " << match->GetID() << "] Removed player " << clientId << std::endl;
 
             // FIX: 여기서 match->Stop()을 절대 호출하지 않음!
             // Match::Loop()가 플레이어 수 감소를 감지하고 스스로 중지할 것임.
@@ -292,7 +344,7 @@ private:
                             [&](const std::shared_ptr<Match>& m) { return m == match; }),
                         matches.end()
                     );
-                    std::cout << "[Server] Cleaned up empty match " << match->GetId() << std::endl;
+                    std::cout << "[Server] Cleaned up empty match " << match->GetID() << std::endl;
                 }
             }
             });
@@ -315,7 +367,7 @@ private:
                 receptionTCP.SendToClient(clientId, msg);
                 };
 
-            std::cout << "[Server] Created new match " << openMatch->GetId() << std::endl;
+            std::cout << "[Server] Created new match " << openMatch->GetID() << std::endl;
         }
 
         s->currentMatch = openMatch;
