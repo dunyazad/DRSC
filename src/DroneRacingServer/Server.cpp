@@ -14,6 +14,11 @@ using namespace libRxTx;
 
 class DroneRacingServer;
 
+struct PlayerTransform {
+    float x, y, z;
+    float roll, pitch, yaw;
+};
+
 // -----------------------------
 // Session 구조체
 // -----------------------------
@@ -47,7 +52,7 @@ public:
             << (s->playerName.empty() ? "(unknown)" : s->playerName)
             << " (" << s->clientId << ")" << std::endl;
 
-		sendCallback("PLAYER_INDEX|" + std::to_string(players.size() - 1), s->clientId);
+        //sendCallback("PLAYER_INDEX|" + std::to_string(players.size() - 1), s->clientId);
     }
 
     void Start() {
@@ -57,14 +62,14 @@ public:
         std::cout << "[Match " << matchId << "] Race started with "
             << players.size() << " players." << std::endl;
 
-  /*      {
-            std::lock_guard<std::mutex> lock(playerMutex);
-            for (auto& p : players) {
-                if (p) {
-                    if (sendCallback) sendCallback("START_RACE|", p->clientId);
-                }
-            }
-        }*/
+        /*      {
+                  std::lock_guard<std::mutex> lock(playerMutex);
+                  for (auto& p : players) {
+                      if (p) {
+                          if (sendCallback) sendCallback("START_RACE|", p->clientId);
+                      }
+                  }
+              }*/
 
         if (thread.joinable()) thread.join();
 
@@ -90,7 +95,7 @@ public:
                     }
                 }
                 countdown--;
-				continue;
+                continue;
             }
             if (-1 == countdown)
             {
@@ -109,10 +114,10 @@ public:
 
             if (-2 == countdown)
             {
-				auto delta = std::chrono::steady_clock::now() - startTime;
+                auto delta = std::chrono::steady_clock::now() - startTime;
                 playTime = std::chrono::duration_cast<std::chrono::milliseconds>(delta).count();
                 {
-					std::lock_guard<std::mutex> lock(playerMutex);
+                    std::lock_guard<std::mutex> lock(playerMutex);
                     for (auto& p : players) {
                         if (p) {
                             if (sendCallback) {
@@ -177,14 +182,22 @@ public:
 
     int GetID() const { return matchId; }
 
-    friend class DroneRacingServer;
+    void SetPlayerTransform(int playerIndex, const PlayerTransform& transform)
+    {
+        std::lock_guard<std::mutex> lock(playerMutex);
+        if (playerIndex >= 0 && playerIndex < playerTransforms.size())
+        {
+            playerTransforms[playerIndex] = transform;
+        }
+	}
 
     std::function<void(const std::string&, const std::string&)> sendCallback;
 
+    friend class DroneRacingServer;
 private:
     int matchId;
     std::atomic<bool> running = false;
-	int countdown = 5;
+    int countdown = 5;
     std::chrono::time_point<std::chrono::steady_clock> startTime;
     long long playTime;
 
@@ -192,6 +205,8 @@ private:
     std::vector<std::shared_ptr<Session>> players;
 
     std::thread thread;
+
+    std::vector<PlayerTransform> playerTransforms;
 };
 
 // -----------------------------
@@ -279,13 +294,21 @@ private:
 
             std::cout << "[TCP " << clientId << "] " << msg << std::endl;
 
-            if (msg.rfind("JOIN", 0) == 0) {
+            if (msg.rfind("JOIN|", 0) == 0) {
                 session->playerName = clientId;
                 AssignToMatch(session);
 
-                std::stringstream ss;
-				ss << "JOINED_MATCH|" << session->currentMatch.lock()->GetID();
-				receptionTCP.SendToClient(clientId, ss.str());
+                {
+                    std::stringstream ss;
+                    ss << "JOINED_MATCH|" << session->currentMatch.lock()->GetID();
+                    receptionTCP.SendToClient(clientId, ss.str());
+                }
+
+                {
+                    std::stringstream ss;
+					ss << "PLAYER_INDEX|" << session->currentMatch.lock()->players.size() - 1;
+                    receptionTCP.SendToClient(clientId, ss.str());
+                }
             }
             else if (msg.rfind("READY|", 0) == 0) {
                 session->ready = true;
@@ -295,6 +318,23 @@ private:
                 if (match && !match->IsRunning() && match->IsReadyToStart()) {
                     match->Start();
                 }
+            }
+            else if (msg.rfind("PLAYER_TRANSFORM|", 0) == 0) {
+                auto match = session->currentMatch.lock();
+                if (match) {
+                    std::istringstream iss(msg.substr(17));
+                    int playerIndex;
+                    PlayerTransform transform;
+                    char sep;
+                    iss >> playerIndex >> sep
+                        >> transform.x >> sep >> transform.y >> sep >> transform.z >> sep
+                        >> transform.roll >> sep >> transform.pitch >> sep >> transform.yaw;
+                    match->SetPlayerTransform(playerIndex, transform);
+
+                    std::cout << "[Match " << match->GetID() << "] Updated transform for player "
+                        << playerIndex << ": (" << transform.x << ", " << transform.y << ", " << transform.z << ") "
+						<< "RPY(" << transform.roll << ", " << transform.pitch << ", " << transform.yaw << ")" << std::endl;
+				}
             }
             });
 

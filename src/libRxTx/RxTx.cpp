@@ -207,6 +207,8 @@ namespace libRxTx {
             clientSockets_.erase(it);
             return;
         }
+
+		std::cout << "[RxTx] Sent to client " << id << ": " << msg << std::endl;
     }
 
     void RxTx::Broadcast(const std::string& msg) {
