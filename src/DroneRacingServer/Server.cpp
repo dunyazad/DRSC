@@ -53,6 +53,8 @@ public:
             << " (" << s->clientId << ")" << std::endl;
 
         //sendCallback("PLAYER_INDEX|" + std::to_string(players.size() - 1), s->clientId);
+
+		playerTransforms.push_back({ 0,0,0,0,0,0 }); // 초기화된
     }
 
     void Start() {
@@ -77,50 +79,154 @@ public:
         thread = std::thread([self]() { self->Loop(); });
     }
 
-    void Loop() {
-        while (running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+#include <iostream>
+#include <string>
+#include <thread>
+#include <chrono>
+#include <mutex>
+#include <vector>
 
-            if (0 <= countdown)
+    // Assuming necessary structs and externs exist based on context
+    // struct PlayerTransform { float x, y, z, roll, pitch, yaw; };
+    // struct Player { int clientId; };
+    // std::mutex playerMutex;
+    // std::vector<PlayerTransform> playerTransforms;
+    // std::vector<std::shared_ptr<Player>> players;
+    // std::function<void(std::string, int)> sendCallback;
+    // bool running = true;
+    // bool raceStarted = false;
+    // int matchId = 1;
+    // int countdown = 5;
+    // long long playTime = 0;
+    // std::chrono::steady_clock::time_point startTime;
+
+    void Loop()
+    {
+        std::chrono::steady_clock::time_point lastTime = std::chrono::steady_clock::now();
+        std::chrono::nanoseconds ellapsedTimeCountDown(0);
+        std::chrono::nanoseconds ellapsedTimeCountSending(0);
+
+        // Constants for time comparison (Nanoseconds)
+        // 1 Second = 1,000,000,000 ns
+        const long long TIME_THRESHOLD_COUNTDOWN = 1000000000;
+        // 16 ms = 16,000,000 ns (approx 60 Hz)
+        const long long TIME_THRESHOLD_SENDING = 16000000;
+
+        while (running)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+            std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+            auto delta = now - lastTime;
+            lastTime = now;
+
+            ellapsedTimeCountDown += std::chrono::duration_cast<std::chrono::nanoseconds>(delta);
+
+            if (raceStarted)
             {
-                std::cout << "[Match " << matchId << "] Countdown: " << countdown << " seconds remaining.\n";
+                ellapsedTimeCountSending += std::chrono::duration_cast<std::chrono::nanoseconds>(delta);
+
+                // Check if accumulated time exceeds 16ms
+                if (ellapsedTimeCountSending.count() >= TIME_THRESHOLD_SENDING)
                 {
-                    std::lock_guard<std::mutex> lock(playerMutex);
-                    for (auto& p : players) {
-                        if (p) {
-                            if (sendCallback) {
+                    std::string msg = "PLAYER_TRANSFORM_UPDATE|";
+                    bool hasData = false;
+
+                    {
+                        std::lock_guard<std::mutex> lock(playerMutex);
+                        size_t pSize = playerTransforms.size();
+
+                        for (size_t i = 0; i < pSize; i++)
+                        {
+                            const auto& transform = playerTransforms[i];
+
+                            // FIX: Added "+=" to actually append the string
+                            msg += std::to_string(i) + ","
+                                + std::to_string(transform.x) + ","
+                                + std::to_string(transform.y) + ","
+                                + std::to_string(transform.z) + ","
+                                + std::to_string(transform.roll) + ","
+                                + std::to_string(transform.pitch) + ","
+                                + std::to_string(transform.yaw);
+
+                            if (i != pSize - 1)
+                            {
+                                msg += "/";
+                            }
+                        }
+                        hasData = (pSize > 0);
+                    }
+
+                    if (hasData)
+                    {
+                        std::lock_guard<std::mutex> lock(playerMutex);
+                        for (auto& p : players)
+                        {
+                            if (p && sendCallback)
+                            {
+                                sendCallback(msg, p->clientId);
+                            }
+                        }
+                    }
+
+                    // FIX: Subtract time inside the if block
+                    ellapsedTimeCountSending -= std::chrono::nanoseconds(TIME_THRESHOLD_SENDING);
+                }
+            }
+
+            // Check if accumulated time exceeds 1 second
+            if (ellapsedTimeCountDown.count() >= TIME_THRESHOLD_COUNTDOWN)
+            {
+                // Reset logic moved inside to prevent drift, or subtract exact amount
+                ellapsedTimeCountDown -= std::chrono::nanoseconds(TIME_THRESHOLD_COUNTDOWN);
+
+                if (countdown >= 0)
+                {
+                    std::cout << "[Match " << matchId << "] Countdown: " << countdown << " seconds remaining.\n";
+
+                    {
+                        std::lock_guard<std::mutex> lock(playerMutex);
+                        for (auto& p : players)
+                        {
+                            if (p && sendCallback)
+                            {
                                 sendCallback("COUNT_DOWN|" + std::to_string(countdown), p->clientId);
                             }
                         }
                     }
+                    countdown--;
+                    // Note: 'continue' here prevents the auto-stop check below. 
+                    // If that is intended, keep it. Otherwise remove it.
+                    continue;
                 }
-                countdown--;
-                continue;
-            }
-            if (-1 == countdown)
-            {
-                startTime = std::chrono::steady_clock::now();
+                else if (countdown == -1)
+                {
+                    raceStarted = true;
+                    startTime = std::chrono::steady_clock::now();
 
-                std::lock_guard<std::mutex> lock(playerMutex);
-                for (auto& p : players) {
-                    if (p) {
-                        if (sendCallback) {
+                    ellapsedTimeCountSending = std::chrono::nanoseconds(0);
+
+                    std::lock_guard<std::mutex> lock(playerMutex);
+                    for (auto& p : players)
+                    {
+                        if (p && sendCallback)
+                        {
                             sendCallback("START_RACE|", p->clientId);
                         }
                     }
+                    countdown--;
                 }
-                countdown--;
-            }
-
-            if (-2 == countdown)
-            {
-                auto delta = std::chrono::steady_clock::now() - startTime;
-                playTime = std::chrono::duration_cast<std::chrono::milliseconds>(delta).count();
+                else if (countdown == -2)
                 {
-                    std::lock_guard<std::mutex> lock(playerMutex);
-                    for (auto& p : players) {
-                        if (p) {
-                            if (sendCallback) {
+                    auto raceDelta = std::chrono::steady_clock::now() - startTime;
+                    playTime = std::chrono::duration_cast<std::chrono::milliseconds>(raceDelta).count();
+
+                    {
+                        std::lock_guard<std::mutex> lock(playerMutex);
+                        for (auto& p : players)
+                        {
+                            if (p && sendCallback)
+                            {
                                 sendCallback("PLAY_TIME|" + std::to_string(playTime), p->clientId);
                             }
                         }
@@ -131,13 +237,17 @@ public:
             int playerCount = 0;
             {
                 std::lock_guard<std::mutex> lock(playerMutex);
-                playerCount = players.size();
+                playerCount = (int)players.size();
             }
 
-            if (playerCount <= 1) {
-                if (running) {
+            if (playerCount <= 1)
+            {
+                // Only stop if the race isn't in countdown phase (optional safeguard)
+                if (running && countdown < 0)
+                {
                     std::cout << "[Match " << matchId << "] Auto-stop: " << playerCount << " player(s) left.\n";
-                    Stop();
+                    // Stop(); 
+                    running = false; // Assuming Stop() sets running to false
                 }
             }
         }
@@ -200,6 +310,7 @@ private:
     int countdown = 5;
     std::chrono::time_point<std::chrono::steady_clock> startTime;
     long long playTime;
+	bool raceStarted = false;
 
     mutable std::mutex playerMutex;
     std::vector<std::shared_ptr<Session>> players;
@@ -292,7 +403,7 @@ private:
                 return;
             }
 
-            std::cout << "[TCP " << clientId << "] " << msg << std::endl;
+            //std::cout << "[TCP " << clientId << "] " << msg << std::endl;
 
             if (msg.rfind("JOIN|", 0) == 0) {
                 session->playerName = clientId;
@@ -319,22 +430,42 @@ private:
                     match->Start();
                 }
             }
-            else if (msg.rfind("PLAYER_TRANSFORM|", 0) == 0) {
+            else if (msg.rfind("PLAYER_TRANSFORM|", 0) == 0)
+            {
                 auto match = session->currentMatch.lock();
-                if (match) {
+                if (match)
+                {
+                    // 1. 헤더("PLAYER_TRANSFORM|") 길이인 17글자 이후부터 파싱 시작
                     std::istringstream iss(msg.substr(17));
-                    int playerIndex;
-                    PlayerTransform transform;
-                    char sep;
-                    iss >> playerIndex >> sep
-                        >> transform.x >> sep >> transform.y >> sep >> transform.z >> sep
-                        >> transform.roll >> sep >> transform.pitch >> sep >> transform.yaw;
-                    match->SetPlayerTransform(playerIndex, transform);
 
-                    std::cout << "[Match " << match->GetID() << "] Updated transform for player "
-                        << playerIndex << ": (" << transform.x << ", " << transform.y << ", " << transform.z << ") "
-						<< "RPY(" << transform.roll << ", " << transform.pitch << ", " << transform.yaw << ")" << std::endl;
-				}
+                    int playerIndex = -1;
+                    PlayerTransform transform;
+                    char sep; // 구분자(_, /, | 등)를 흡수할 임시 변수
+
+                    iss >> playerIndex >> sep
+                        >> transform.x >> sep
+                        >> transform.y >> sep
+                        >> transform.z >> sep
+                        >> transform.roll >> sep
+                        >> transform.pitch >> sep
+                        >> transform.yaw;
+
+                    // 2. 스트림 파싱
+                    // 포맷 가정: Index(구분자)X(구분자)Y(구분자)Z(구분자)Roll(구분자)Pitch(구분자)Yaw
+                    // 예: "0/100.5_200.5_300.5/0.0_90.0_0.0"
+                    {
+                        // 3. 데이터 업데이트
+                        match->SetPlayerTransform(playerIndex, transform);
+
+                        // 디버깅이 필요한 경우 아래 주석 해제
+                        /*
+                        std::cout << "[Match " << match->GetID() << "] Player " << playerIndex
+                                  << " Transform Updated: "
+                                  << transform.x << ", " << transform.y << ", " << transform.z
+                                  << std::endl;
+                        */
+                    }
+                }
             }
             });
 
