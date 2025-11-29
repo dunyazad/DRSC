@@ -1,14 +1,15 @@
 #include "RxTx/RxTx.h"
-#include <thread>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <iostream>
-#include <unordered_map>
-#include <mutex>
-#include <vector>
 #include <memory>
-#include <atomic>
+#include <mutex>
 #include <sstream>
-#include <algorithm> // std::remove_if
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 using namespace libRxTx;
 
@@ -79,27 +80,6 @@ public:
         thread = std::thread([self]() { self->Loop(); });
     }
 
-#include <iostream>
-#include <string>
-#include <thread>
-#include <chrono>
-#include <mutex>
-#include <vector>
-
-    // Assuming necessary structs and externs exist based on context
-    // struct PlayerTransform { float x, y, z, roll, pitch, yaw; };
-    // struct Player { int clientId; };
-    // std::mutex playerMutex;
-    // std::vector<PlayerTransform> playerTransforms;
-    // std::vector<std::shared_ptr<Player>> players;
-    // std::function<void(std::string, int)> sendCallback;
-    // bool running = true;
-    // bool raceStarted = false;
-    // int matchId = 1;
-    // int countdown = 5;
-    // long long playTime = 0;
-    // std::chrono::steady_clock::time_point startTime;
-
     void Loop()
     {
         std::chrono::steady_clock::time_point lastTime = std::chrono::steady_clock::now();
@@ -140,7 +120,6 @@ public:
                         {
                             const auto& transform = playerTransforms[i];
 
-                            // FIX: Added "+=" to actually append the string
                             msg += std::to_string(i) + ","
                                 + std::to_string(transform.x) + ","
                                 + std::to_string(transform.y) + ","
@@ -169,15 +148,12 @@ public:
                         }
                     }
 
-                    // FIX: Subtract time inside the if block
                     ellapsedTimeCountSending -= std::chrono::nanoseconds(TIME_THRESHOLD_SENDING);
                 }
             }
 
-            // Check if accumulated time exceeds 1 second
             if (ellapsedTimeCountDown.count() >= TIME_THRESHOLD_COUNTDOWN)
             {
-                // Reset logic moved inside to prevent drift, or subtract exact amount
                 ellapsedTimeCountDown -= std::chrono::nanoseconds(TIME_THRESHOLD_COUNTDOWN);
 
                 if (countdown >= 0)
@@ -195,8 +171,6 @@ public:
                         }
                     }
                     countdown--;
-                    // Note: 'continue' here prevents the auto-stop check below. 
-                    // If that is intended, keep it. Otherwise remove it.
                     continue;
                 }
                 else if (countdown == -1)
@@ -206,12 +180,15 @@ public:
 
                     ellapsedTimeCountSending = std::chrono::nanoseconds(0);
 
+					std::stringstream ss;
+					ss << "START_RACE|" << players.size();
+
                     std::lock_guard<std::mutex> lock(playerMutex);
                     for (auto& p : players)
                     {
                         if (p && sendCallback)
                         {
-                            sendCallback("START_RACE|", p->clientId);
+                            sendCallback(ss.str(), p->clientId);
                         }
                     }
                     countdown--;
@@ -242,12 +219,11 @@ public:
 
             if (playerCount <= 1)
             {
-                // Only stop if the race isn't in countdown phase (optional safeguard)
                 if (running && countdown < 0)
                 {
                     std::cout << "[Match " << matchId << "] Auto-stop: " << playerCount << " player(s) left.\n";
                     // Stop(); 
-                    running = false; // Assuming Stop() sets running to false
+                    running = false;
                 }
             }
         }
@@ -388,8 +364,7 @@ private:
             receptionTCP.MapClientIpToId(ip, session->clientId);
             receptionTCP.RegisterClientSocket(session->clientId, ip);
 
-            std::cout << "[TCP] Connected: " << ip
-                << " -> ClientID=" << session->clientId << std::endl;
+            std::cout << "[TCP] Connected: " << ip << " -> ClientID=" << session->clientId << std::endl;
 
             return "CLIENT_ID|" + session->clientId;
             });
