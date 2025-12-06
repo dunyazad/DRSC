@@ -56,6 +56,7 @@ public:
         //sendCallback("PLAYER_INDEX|" + std::to_string(players.size() - 1), s->clientId);
 
 		playerTransforms.push_back({ 0,0,0,0,0,0 }); // 초기화된
+		playerScores.push_back(0);
     }
 
     void Start() {
@@ -109,41 +110,104 @@ public:
                 // Check if accumulated time exceeds 16ms
                 if (ellapsedTimeCountSending.count() >= TIME_THRESHOLD_SENDING)
                 {
-                    std::string msg = "PLAYER_TRANSFORM_UPDATE|";
-                    bool hasData = false;
-
                     {
-                        std::lock_guard<std::mutex> lock(playerMutex);
-                        size_t pSize = playerTransforms.size();
+                        std::string msg = "PLAYER_TRANSFORM_UPDATE|";
+                        bool hasData = false;
 
-                        for (size_t i = 0; i < pSize; i++)
                         {
-                            const auto& transform = playerTransforms[i];
+                            std::lock_guard<std::mutex> lock(playerMutex);
+                            size_t pSize = playerTransforms.size();
 
-                            msg += std::to_string(i) + ","
-                                + std::to_string(transform.x) + ","
-                                + std::to_string(transform.y) + ","
-                                + std::to_string(transform.z) + ","
-                                + std::to_string(transform.roll) + ","
-                                + std::to_string(transform.pitch) + ","
-                                + std::to_string(transform.yaw);
-
-                            if (i != pSize - 1)
+                            for (size_t i = 0; i < pSize; i++)
                             {
-                                msg += "/";
+                                const auto& transform = playerTransforms[i];
+
+                                msg += std::to_string(i) + ","
+                                    + std::to_string(transform.x) + ","
+                                    + std::to_string(transform.y) + ","
+                                    + std::to_string(transform.z) + ","
+                                    + std::to_string(transform.roll) + ","
+                                    + std::to_string(transform.pitch) + ","
+                                    + std::to_string(transform.yaw);
+
+                                if (i != pSize - 1)
+                                {
+                                    msg += "/";
+                                }
+                            }
+                            hasData = (pSize > 0);
+                        }
+
+                        if (hasData)
+                        {
+                            std::lock_guard<std::mutex> lock(playerMutex);
+                            for (auto& p : players)
+                            {
+                                if (p && sendCallback)
+                                {
+                                    sendCallback(msg, p->clientId);
+                                }
                             }
                         }
-                        hasData = (pSize > 0);
                     }
-
-                    if (hasData)
                     {
-                        std::lock_guard<std::mutex> lock(playerMutex);
-                        for (auto& p : players)
+                        std::string msg = "PLAYER_RANKING_UPDATE|";
+                        bool hasData = false;
+
+                        std::vector<std::tuple<unsigned int, unsigned int>> scores;
                         {
-                            if (p && sendCallback)
+                            std::lock_guard<std::mutex> lock(playerMutex);
+                            size_t pSize = playerScores.size();
+                            for (size_t i = 0; i < pSize; i++)
                             {
-                                sendCallback(msg, p->clientId);
+                                scores.emplace_back(i, playerScores[i]);
+                            }
+
+							// Sort by score descending
+                            std::sort(scores.begin(), scores.end(),
+                                [](const auto& a, const auto& b) {
+                                    return std::get<1>(a) > std::get<1>(b);
+								});
+
+							std::vector<unsigned int> scorePerPlayerIndex;
+                            scorePerPlayerIndex.resize(pSize);
+                            for (size_t rank = 0; rank < scores.size(); rank++)
+                            {
+                                const auto& [playerIndex, score] = scores[rank];
+                                scorePerPlayerIndex[playerIndex] = rank + 1; // Rank starts from 1
+                            }
+                            scores.clear();
+                            for (size_t i = 0; i < pSize; i++)
+                            {
+                                scores.emplace_back(i, scorePerPlayerIndex[i]);
+                            }
+                        }
+
+                        {
+                            std::lock_guard<std::mutex> lock(playerMutex);
+                            size_t pSize = playerScores.size();
+                            for (size_t i = 0; i < pSize; i++)
+                            {
+                                const auto& [playerIndex, rank] = scores[i];
+                                msg += std::to_string(playerIndex) + ","
+                                    + std::to_string(rank);
+                                if (i != pSize - 1)
+                                {
+                                    msg += "/";
+                                }
+							}
+							hasData = (pSize > 0);
+                        }
+
+                        if (hasData)
+                        {
+                            std::lock_guard<std::mutex> lock(playerMutex);
+                            for (auto& p : players)
+                            {
+                                if (p && sendCallback)
+                                {
+                                    sendCallback(msg, p->clientId);
+                                }
                             }
                         }
                     }
@@ -277,6 +341,60 @@ public:
         }
 	}
 
+    void SetPlayerScore(int playerIndex, unsigned int score)
+    {
+        std::lock_guard<std::mutex> lock(playerMutex);
+        if (playerIndex >= 0 && playerIndex < playerScores.size())
+        {
+            playerScores[playerIndex] = score;
+        }
+
+        if (26 <= score)
+        {
+			PropagatePlayerWin(playerIndex);
+        }
+    }
+
+    void PropagatePlayerWin(int winnerIndex)
+    {
+        raceStarted = false;
+
+        std::stringstream ss;
+        ss << "PLAYER_WIN|" << winnerIndex;
+
+        std::lock_guard<std::mutex> lock(playerMutex);
+        for (auto& p : players)
+        {
+            if (p) {
+                if (sendCallback) {
+                    std::cout << "[Match " << matchId << "] Sending PLAYER_WIN(" << winnerIndex
+                        << ") to " << p->clientId << std::endl;
+                    sendCallback(ss.str(), p->clientId);
+				}
+            }
+        }
+    }
+
+    void PropagatePlayerCrashed(int crashedPlayerIndex)
+    {
+        raceStarted = false;
+
+		std::stringstream ss;
+		ss << "PLAYER_CRASHED|" << crashedPlayerIndex;
+
+        std::lock_guard<std::mutex> lock(playerMutex);
+        for (auto& p : players)
+        {
+            if (p) {
+                if (sendCallback) {
+                    std::cout << "[Match " << matchId << "] Sending PLAYER_CRASHED(" << crashedPlayerIndex
+                        << ") to " << p->clientId << std::endl;
+                    sendCallback(ss.str(), p->clientId);
+                }
+            }
+        }
+    }
+
     std::function<void(const std::string&, const std::string&)> sendCallback;
 
     friend class DroneRacingServer;
@@ -294,6 +412,7 @@ private:
     std::thread thread;
 
     std::vector<PlayerTransform> playerTransforms;
+    std::vector<unsigned int> playerScores;
 };
 
 // -----------------------------
@@ -440,6 +559,44 @@ private:
                                   << std::endl;
                         */
                     }
+                }
+            }
+            else if (msg.rfind("PLAYER_SCORE|", 0) == 0)
+            {
+                auto match = session->currentMatch.lock();
+                if (match)
+                {
+                    std::istringstream iss(msg.substr(13));
+                    int playerIndex = -1;
+                    unsigned int score = 0;
+                    char sep; // 구분자(_, /, | 등)를 흡수할 임시 변수
+                    iss >> playerIndex >> sep >> score;
+                    {
+                        match->SetPlayerScore(playerIndex, score);
+                        // 디버깅이 필요한 경우 아래 주석 해제
+                        /*
+                        std::cout << "[Match " << match->GetID() << "] Player " << playerIndex
+                                  << " Score Updated: " << score
+                                  << std::endl;
+                        */
+					}
+                }
+            }
+            else if (msg.rfind("PLAYER_CRASHED|", 0) == 0)
+            {
+                auto match = session->currentMatch.lock();
+                if (match)
+                {
+                    std::istringstream iss(msg.substr(15));
+                    int playerIndex = -1;
+                    char sep; // 구분자(_, /, | 등)를 흡수할 임시 변수
+                    iss >> playerIndex;
+					match->PropagatePlayerCrashed(playerIndex);
+                    {
+                        std::cout << "[Match " << match->GetID() << "] Player " << playerIndex
+                                  << " has crashed."
+                                  << std::endl;
+					}
                 }
             }
             });
