@@ -20,10 +20,16 @@ struct PlayerTransform {
     float roll, pitch, yaw;
 };
 
+enum class SessionType {
+    Observer,
+    Player
+};
+
 // -----------------------------
 // Session 구조체
 // -----------------------------
 struct Session {
+	SessionType type = SessionType::Player;
     std::string clientId;
     std::string playerName;
     std::string ip;
@@ -57,6 +63,16 @@ public:
 
 		playerTransforms.push_back({ 0,0,0,0,0,0 }); // 초기화된
 		playerScores.push_back(0);
+    }
+
+    void AddObserver(std::shared_ptr<Session> s) {
+        std::lock_guard<std::mutex> lock(observerMutex);
+        observers.push_back(s);
+        std::cout << "[Match " << matchId << "] Added observer: "
+            << (s->playerName.empty() ? "(unknown)" : s->playerName)
+            << " (" << s->clientId << ")" << std::endl;
+
+        //sendCallback("PLAYER_INDEX|" + std::to_string(players.size() - 1), s->clientId);
     }
 
     void Start() {
@@ -140,12 +156,25 @@ public:
 
                         if (hasData)
                         {
-                            std::lock_guard<std::mutex> lock(playerMutex);
-                            for (auto& p : players)
                             {
-                                if (p && sendCallback)
+                                std::lock_guard<std::mutex> lock(playerMutex);
+                                for (auto& p : players)
                                 {
-                                    sendCallback(msg, p->clientId);
+                                    if (p && sendCallback)
+                                    {
+                                        sendCallback(msg, p->clientId);
+                                    }
+                                }
+                            }
+
+                            {
+                                std::lock_guard<std::mutex> lock(observerMutex);
+                                for (auto& p : observers)
+                                {
+                                    if (p && sendCallback)
+                                    {
+                                        sendCallback(msg, p->clientId);
+                                    }
                                 }
                             }
                         }
@@ -158,29 +187,47 @@ public:
                         {
                             std::lock_guard<std::mutex> lock(playerMutex);
                             size_t pSize = playerScores.size();
-                            for (size_t i = 0; i < pSize; i++)
-                            {
-                                scores.emplace_back(i, playerScores[i]);
-                            }
 
-							// Sort by score descending
+                            for (size_t i = 0; i < pSize; i++)
+                                scores.emplace_back(i, playerScores[i]);
+
                             std::sort(scores.begin(), scores.end(),
                                 [](const auto& a, const auto& b) {
                                     return std::get<1>(a) > std::get<1>(b);
-								});
+                                });
 
-							std::vector<unsigned int> scorePerPlayerIndex;
-                            scorePerPlayerIndex.resize(pSize);
-                            for (size_t rank = 0; rank < scores.size(); rank++)
+                            std::vector<unsigned int> scorePerPlayerIndex(pSize, 0);
+
+                            unsigned int currentRank = 1;
+
+                            for (size_t i = 0; i < scores.size(); ++i)
                             {
-                                const auto& [playerIndex, score] = scores[rank];
-                                scorePerPlayerIndex[playerIndex] = rank + 1; // Rank starts from 1
+                                const auto& [playerIndex, score] = scores[i];
+
+                                if (i > 0)
+                                {
+                                    const auto& [prevPlayerIndex, prevScore] = scores[i - 1];
+
+                                    if (score == prevScore)
+                                    {
+                                        scorePerPlayerIndex[playerIndex] = scorePerPlayerIndex[prevPlayerIndex];
+                                    }
+                                    else
+                                    {
+                                        scorePerPlayerIndex[playerIndex] = currentRank;
+                                    }
+                                }
+                                else
+                                {
+                                    scorePerPlayerIndex[playerIndex] = currentRank;
+                                }
+
+                                currentRank++;
                             }
+
                             scores.clear();
                             for (size_t i = 0; i < pSize; i++)
-                            {
                                 scores.emplace_back(i, scorePerPlayerIndex[i]);
-                            }
                         }
 
                         {
@@ -201,13 +248,25 @@ public:
 
                         if (hasData)
                         {
-                            std::lock_guard<std::mutex> lock(playerMutex);
-                            for (auto& p : players)
                             {
-                                if (p && sendCallback)
+                                std::lock_guard<std::mutex> lock(playerMutex);
+                                for (auto& p : players)
                                 {
-                                    sendCallback(msg, p->clientId);
+                                    if (p && sendCallback)
+                                    {
+                                        sendCallback(msg, p->clientId);
+                                    }
                                 }
+                            }
+                            {
+                                //std::lock_guard<std::mutex> lock(observerMutex);
+                                //for (auto& p : observers)
+                                //{
+                                //    if (p && sendCallback)
+                                //    {
+                                //        sendCallback(msg, p->clientId);
+                                //    }
+                                //}
                             }
                         }
                     }
@@ -234,6 +293,16 @@ public:
                             }
                         }
                     }
+                    {
+                        std::lock_guard<std::mutex> lock(observerMutex);
+                        for (auto& p : observers)
+                        {
+                            if (p && sendCallback)
+                            {
+                                sendCallback("COUNT_DOWN|" + std::to_string(countdown), p->clientId);
+                            }
+                        }
+                    }
                     countdown--;
                     continue;
                 }
@@ -247,12 +316,24 @@ public:
 					std::stringstream ss;
 					ss << "START_RACE|" << players.size();
 
-                    std::lock_guard<std::mutex> lock(playerMutex);
-                    for (auto& p : players)
                     {
-                        if (p && sendCallback)
+                        std::lock_guard<std::mutex> lock(playerMutex);
+                        for (auto& p : players)
                         {
-                            sendCallback(ss.str(), p->clientId);
+                            if (p && sendCallback)
+                            {
+                                sendCallback(ss.str(), p->clientId);
+                            }
+                        }
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(observerMutex);
+                        for (auto& p : observers)
+                        {
+                            if (p && sendCallback)
+                            {
+                                sendCallback(ss.str(), p->clientId);
+                            }
                         }
                     }
                     countdown--;
@@ -265,6 +346,16 @@ public:
                     {
                         std::lock_guard<std::mutex> lock(playerMutex);
                         for (auto& p : players)
+                        {
+                            if (p && sendCallback)
+                            {
+                                sendCallback("PLAY_TIME|" + std::to_string(playTime), p->clientId);
+                            }
+                        }
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(observerMutex);
+                        for (auto& p : observers)
                         {
                             if (p && sendCallback)
                             {
@@ -307,7 +398,18 @@ public:
                 if (p) {
                     if (sendCallback) {
                         std::cout << "[Match " << matchId << "] Sending RACE_FINISHED to " << p->clientId << std::endl;
-                        sendCallback("RACE_FINISHED", p->clientId);
+                        sendCallback("RACE_FINISHED|", p->clientId);
+                    }
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(observerMutex);
+            for (auto& p : observers) {
+                if (p) {
+                    if (sendCallback) {
+                        std::cout << "[Match " << matchId << "] Sending RACE_FINISHED to " << p->clientId << std::endl;
+                        sendCallback("RACE_FINISHED|", p->clientId);
                     }
                 }
             }
@@ -318,7 +420,7 @@ public:
 
     bool IsFull() const {
         std::lock_guard<std::mutex> lock(playerMutex);
-        return players.size() >= 4;
+        return players.size() >= 2;
     }
 
     bool IsReadyToStart() const {
@@ -362,15 +464,30 @@ public:
         std::stringstream ss;
         ss << "PLAYER_WIN|" << winnerIndex;
 
-        std::lock_guard<std::mutex> lock(playerMutex);
-        for (auto& p : players)
         {
-            if (p) {
-                if (sendCallback) {
-                    std::cout << "[Match " << matchId << "] Sending PLAYER_WIN(" << winnerIndex
-                        << ") to " << p->clientId << std::endl;
-                    sendCallback(ss.str(), p->clientId);
-				}
+            std::lock_guard<std::mutex> lock(playerMutex);
+            for (auto& p : players)
+            {
+                if (p) {
+                    if (sendCallback) {
+                        std::cout << "[Match " << matchId << "] Sending PLAYER_WIN(" << winnerIndex
+                            << ") to " << p->clientId << std::endl;
+                        sendCallback(ss.str(), p->clientId);
+                    }
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(observerMutex);
+            for (auto& p : observers)
+            {
+                if (p) {
+                    if (sendCallback) {
+                        std::cout << "[Match " << matchId << "] Sending PLAYER_WIN(" << winnerIndex
+                            << ") to " << p->clientId << std::endl;
+                        sendCallback(ss.str(), p->clientId);
+                    }
+                }
             }
         }
     }
@@ -382,14 +499,29 @@ public:
 		std::stringstream ss;
 		ss << "PLAYER_CRASHED|" << crashedPlayerIndex;
 
-        std::lock_guard<std::mutex> lock(playerMutex);
-        for (auto& p : players)
         {
-            if (p) {
-                if (sendCallback) {
-                    std::cout << "[Match " << matchId << "] Sending PLAYER_CRASHED(" << crashedPlayerIndex
-                        << ") to " << p->clientId << std::endl;
-                    sendCallback(ss.str(), p->clientId);
+            std::lock_guard<std::mutex> lock(playerMutex);
+            for (auto& p : players)
+            {
+                if (p) {
+                    if (sendCallback) {
+                        std::cout << "[Match " << matchId << "] Sending PLAYER_CRASHED(" << crashedPlayerIndex
+                            << ") to " << p->clientId << std::endl;
+                        sendCallback(ss.str(), p->clientId);
+                    }
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(observerMutex);
+            for (auto& p : observers)
+            {
+                if (p) {
+                    if (sendCallback) {
+                        std::cout << "[Match " << matchId << "] Sending PLAYER_CRASHED(" << crashedPlayerIndex
+                            << ") to " << p->clientId << std::endl;
+                        sendCallback(ss.str(), p->clientId);
+                    }
                 }
             }
         }
@@ -408,6 +540,9 @@ private:
 
     mutable std::mutex playerMutex;
     std::vector<std::shared_ptr<Session>> players;
+
+    mutable std::mutex observerMutex;
+    std::vector<std::shared_ptr<Session>> observers;
 
     std::thread thread;
 
@@ -501,6 +636,19 @@ private:
 
             if (msg.rfind("JOIN|", 0) == 0) {
                 session->playerName = clientId;
+
+                std::istringstream iss(msg.substr(17));
+				std::string typeStr;
+                iss >> typeStr;
+                std::transform(typeStr.begin(), typeStr.end(), typeStr.begin(), ::tolower);
+                if (typeStr == "observer")
+                {
+                    session->type = SessionType::Observer;
+                }
+                else
+                {
+                    session->type = SessionType::Player;
+                }
                 AssignToMatch(session);
 
                 {
@@ -597,6 +745,8 @@ private:
                                   << " has crashed."
                                   << std::endl;
 					}
+                    
+                    match->Stop();
                 }
             }
             });
@@ -619,16 +769,31 @@ private:
 
             bool wasRemoved = false;
             {
-                std::lock_guard<std::mutex> lock(match->playerMutex);
-                auto& players = match->players;
-                auto it = std::remove_if(players.begin(), players.end(),
-                    [&](const std::shared_ptr<Session>& p) {
-                        return p && p->clientId == clientId;
-                    });
+                {
+                    std::lock_guard<std::mutex> lock(match->playerMutex);
+                    auto& players = match->players;
+                    auto it = std::remove_if(players.begin(), players.end(),
+                        [&](const std::shared_ptr<Session>& p) {
+                            return p && p->clientId == clientId;
+                        });
 
-                if (it != players.end()) {
-                    players.erase(it, players.end());
-                    wasRemoved = true;
+                    if (it != players.end()) {
+                        players.erase(it, players.end());
+                        wasRemoved = true;
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(match->observerMutex);
+                    auto& observers = match->observers;
+                    auto it = std::remove_if(observers.begin(), observers.end(),
+                        [&](const std::shared_ptr<Session>& p) {
+                            return p && p->clientId == clientId;
+                        });
+
+                    if (it != observers.end()) {
+                        observers.erase(it, observers.end());
+                        wasRemoved = true;
+                    }
                 }
             }
 
@@ -662,23 +827,41 @@ private:
     }
 
     void AssignToMatch(std::shared_ptr<Session> s) {
-        auto openMatch = FindOpenMatch();
-        if (!openMatch) {
-            openMatch = std::make_shared<Match>(nextMatchId++);
-            matches.push_back(openMatch);
-            openMatch->sendCallback = [this](const std::string& msg, const std::string& clientId) {
-                receptionTCP.SendToClient(clientId, msg);
-                };
+        if (SessionType::Player == s->type)
+        {
+            auto openMatch = FindOpenMatch();
+            if (!openMatch) {
+                openMatch = std::make_shared<Match>(nextMatchId++);
+                matches.push_back(openMatch);
+                openMatch->sendCallback = [this](const std::string& msg, const std::string& clientId) {
+                    receptionTCP.SendToClient(clientId, msg);
+                    };
 
-            std::cout << "[Server] Created new match " << openMatch->GetID() << std::endl;
+                std::cout << "[Server] Created new match " << openMatch->GetID() << std::endl;
+            }
+
+            s->currentMatch = openMatch;
+
+            openMatch->AddPlayer(s);
+            if (openMatch->IsReadyToStart()) {
+                openMatch->Start();
+            }
         }
+        else if(SessionType::Observer == s->type)
+        {
+            auto firstMatch = FindFirstMatch();
+            if (nullptr == firstMatch)
+            {
+                firstMatch = std::make_shared<Match>(nextMatchId++);
+                matches.push_back(firstMatch);
+                firstMatch->sendCallback = [this](const std::string& msg, const std::string& clientId) {
+                    receptionTCP.SendToClient(clientId, msg);
+                    };
 
-        s->currentMatch = openMatch;
-        openMatch->AddPlayer(s);
-
-        if (openMatch->IsReadyToStart()) {
-            openMatch->Start();
-        }
+                std::cout << "[Server] Created new match " << firstMatch->GetID() << std::endl;
+            }
+            firstMatch->AddObserver(s);
+		}
     }
 
     std::shared_ptr<Match> FindOpenMatch() {
@@ -687,6 +870,13 @@ private:
                 return m;
         }
         return nullptr;
+    }
+
+    std::shared_ptr<Match> FindFirstMatch() {
+        if(matches.empty())
+			return nullptr;
+        else
+			return matches.front();
     }
 };
 

@@ -53,11 +53,11 @@ public:
                             std::cout << "[Client] Sent JOIN and READY for " << clientId_ << std::endl;
                         }
                     }
-                    else if (msg == "START_RACE") {
+                    else if (msg == "START_RACE|") {
                         std::cout << "[Client] Race started!" << std::endl;
                         raceStarted_ = true;
                     }
-                    else if (msg == "RACE_FINISHED") {
+                    else if (msg == "RACE_FINISHED|") {
                         std::cout << "[Client] Race finished. Shutting down..." << std::endl;
                         raceStarted_ = false;
 
