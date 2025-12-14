@@ -386,10 +386,6 @@ public:
     }
 
     void Stop() {
-        if (!running.exchange(false)) {
-            return;
-        }
-
         std::cout << "[Match " << matchId << "] Stopping..." << std::endl;
 
         {
@@ -413,6 +409,10 @@ public:
                     }
                 }
             }
+        }
+
+        if (!running.exchange(false)) {
+            return;
         }
     }
 
@@ -637,7 +637,9 @@ private:
             if (msg.rfind("JOIN|", 0) == 0) {
                 session->playerName = clientId;
 
-                std::istringstream iss(msg.substr(17));
+				auto remaining = msg.substr(5);
+
+                std::istringstream iss(remaining);
 				std::string typeStr;
                 iss >> typeStr;
                 std::transform(typeStr.begin(), typeStr.end(), typeStr.begin(), ::tolower);
@@ -807,6 +809,9 @@ private:
             {
                 std::lock_guard<std::mutex> lock(match->playerMutex);
                 if (match->players.empty() && !match->IsRunning()) {
+
+					//match->Stop();
+
                     matches.erase(
                         std::remove_if(matches.begin(), matches.end(),
                             [&](const std::shared_ptr<Match>& m) { return m == match; }),
@@ -860,6 +865,9 @@ private:
 
                 std::cout << "[Server] Created new match " << firstMatch->GetID() << std::endl;
             }
+            
+            s->currentMatch = firstMatch;
+
             firstMatch->AddObserver(s);
 		}
     }
