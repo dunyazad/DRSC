@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -10,6 +11,9 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <fstream>
+#include <queue>
+#include <condition_variable>
 
 using namespace libRxTx;
 
@@ -82,14 +86,16 @@ public:
         std::cout << "[Match " << matchId << "] Race started with "
             << players.size() << " players." << std::endl;
 
-        /*      {
-                  std::lock_guard<std::mutex> lock(playerMutex);
-                  for (auto& p : players) {
-                      if (p) {
-                          if (sendCallback) sendCallback("START_RACE|", p->clientId);
-                      }
-                  }
-              }*/
+        std::string filename = "match_" + std::to_string(matchId) + "_log.txt";
+        logFile.open(filename, std::ios::out | std::ios::trunc);
+        if (logFile.is_open()) {
+            std::cout << "[Match " << matchId << "] Logging started: " << filename << std::endl;
+        }
+
+        // 2. 로깅 쓰레드 시작
+        isLoggingActive = true;
+        if (logThread.joinable()) logThread.join();
+        logThread = std::thread(&Match::LogWorker, this);
 
         if (thread.joinable()) thread.join();
 
@@ -104,7 +110,6 @@ public:
         std::chrono::nanoseconds ellapsedTimeCountSending(0);
 
         // Constants for time comparison (Nanoseconds)
-        // 1 Second = 1,000,000,000 ns
         const long long TIME_THRESHOLD_COUNTDOWN = 1000000000;
         // 16 ms = 16,000,000 ns (approx 60 Hz)
         const long long TIME_THRESHOLD_SENDING = 16000000;
@@ -126,10 +131,17 @@ public:
                 // Check if accumulated time exceeds 16ms
                 if (ellapsedTimeCountSending.count() >= TIME_THRESHOLD_SENDING)
                 {
+                    // [수정 포인트] 여기서부터 완전히 교체하세요.
                     {
-                        std::string msg = "PLAYER_TRANSFORM_UPDATE|";
-                        bool hasData = false;
+                        // 1. stringstream을 매번 새로 생성 (가장 안전함)
+                        std::stringstream ssMsg;
 
+                        // 2. 소수점 고정 및 6자리 설정 (이 설정은 이 stream 객체가 죽을 때까지 유지됨)
+                        ssMsg << std::fixed << std::setprecision(6);
+
+                        ssMsg << "PLAYER_TRANSFORM_UPDATE|";
+
+                        bool hasData = false;
                         {
                             std::lock_guard<std::mutex> lock(playerMutex);
                             size_t pSize = playerTransforms.size();
@@ -138,17 +150,18 @@ public:
                             {
                                 const auto& transform = playerTransforms[i];
 
-                                msg += std::to_string(i) + ","
-                                    + std::to_string(transform.x) + ","
-                                    + std::to_string(transform.y) + ","
-                                    + std::to_string(transform.z) + ","
-                                    + std::to_string(transform.roll) + ","
-                                    + std::to_string(transform.pitch) + ","
-                                    + std::to_string(transform.yaw);
+                                // 3. 좌표 데이터 입력 (위에서 설정한 6자리가 적용됨)
+                                ssMsg << i << ","
+                                    << transform.x << ","
+                                    << transform.y << ","
+                                    << transform.z << ","
+                                    << transform.roll << ","
+                                    << transform.pitch << ","
+                                    << transform.yaw;
 
                                 if (i != pSize - 1)
                                 {
-                                    msg += "/";
+                                    ssMsg << "/";
                                 }
                             }
                             hasData = (pSize > 0);
@@ -156,29 +169,37 @@ public:
 
                         if (hasData)
                         {
+                            // 4. 완성된 문자열 추출
+                            std::string msg = ssMsg.str();
+
+                            // 5. 비동기 로깅 (파일 저장)
                             {
-                                std::lock_guard<std::mutex> lock(playerMutex);
-                                for (auto& p : players)
-                                {
-                                    if (p && sendCallback)
-                                    {
-                                        sendCallback(msg, p->clientId);
-                                    }
-                                }
+                                auto raceCurrentTime = std::chrono::steady_clock::now();
+                                long long raceDelta = std::chrono::duration_cast<std::chrono::milliseconds>(raceCurrentTime - startTime).count();
+
+                                // 로그용 stream 별도 생성 (안전빵)
+                                std::stringstream ssLog;
+                                ssLog << raceDelta << "|" << msg << "\n";
+
+                                EnqueueLog(ssLog.str());
                             }
 
+                            // 6. 네트워크 전송 (기존과 동일)
+                            {
+                                std::lock_guard<std::mutex> lock(playerMutex);
+                                for (auto& p : players) {
+                                    if (p && sendCallback) sendCallback(msg, p->clientId);
+                                }
+                            }
                             {
                                 std::lock_guard<std::mutex> lock(observerMutex);
-                                for (auto& p : observers)
-                                {
-                                    if (p && sendCallback)
-                                    {
-                                        sendCallback(msg, p->clientId);
-                                    }
+                                for (auto& p : observers) {
+                                    if (p && sendCallback) sendCallback(msg, p->clientId);
                                 }
                             }
                         }
                     }
+
                     {
                         std::string msg = "PLAYER_RANKING_UPDATE|";
                         bool hasData = false;
@@ -242,8 +263,8 @@ public:
                                 {
                                     msg += "/";
                                 }
-							}
-							hasData = (pSize > 0);
+                            }
+                            hasData = (pSize > 0);
                         }
 
                         if (hasData)
@@ -257,16 +278,6 @@ public:
                                         sendCallback(msg, p->clientId);
                                     }
                                 }
-                            }
-                            {
-                                //std::lock_guard<std::mutex> lock(observerMutex);
-                                //for (auto& p : observers)
-                                //{
-                                //    if (p && sendCallback)
-                                //    {
-                                //        sendCallback(msg, p->clientId);
-                                //    }
-                                //}
                             }
                         }
                     }
@@ -313,8 +324,8 @@ public:
 
                     ellapsedTimeCountSending = std::chrono::nanoseconds(0);
 
-					std::stringstream ss;
-					ss << "START_RACE|" << players.size();
+                    std::stringstream ss;
+                    ss << "START_RACE|" << players.size();
 
                     {
                         std::lock_guard<std::mutex> lock(playerMutex);
@@ -377,7 +388,6 @@ public:
                 if (running && countdown < 0)
                 {
                     std::cout << "[Match " << matchId << "] Auto-stop: " << playerCount << " player(s) left.\n";
-                    // Stop(); 
                     running = false;
                 }
             }
@@ -411,8 +421,25 @@ public:
             }
         }
 
-        if (!running.exchange(false)) {
-            return;
+        bool expected = true;
+        if (!running.compare_exchange_strong(expected, false)) {
+            // 이미 멈춘 상태라면 별도 처리 없음
+        }
+
+        // [비동기 로깅 종료]
+        {
+            std::lock_guard<std::mutex> lock(logMutex);
+            isLoggingActive = false;
+        }
+        logCv.notify_all(); // 대기 중인 로깅 쓰레드 깨우기
+
+        if (logThread.joinable()) {
+            logThread.join();
+        }
+
+        if (logFile.is_open()) {
+            logFile.close();
+            std::cout << "[Match " << matchId << "] Log file closed." << std::endl;
         }
     }
 
@@ -548,6 +575,49 @@ private:
 
     std::vector<PlayerTransform> playerTransforms;
     std::vector<unsigned int> playerScores;
+
+    std::ofstream logFile;
+    std::thread logThread;
+    std::queue<std::string> logQueue;
+    std::mutex logMutex;
+    std::condition_variable logCv;
+
+    bool isLoggingActive = false;
+    void EnqueueLog(const std::string& message) {
+        {
+            std::lock_guard<std::mutex> lock(logMutex);
+            if (!isLoggingActive) return;
+            logQueue.push(message);
+        }
+        logCv.notify_one();
+    }
+
+    void LogWorker() {
+        while (true) {
+            std::unique_lock<std::mutex> lock(logMutex);
+
+            logCv.wait(lock, [this]() {
+                return !logQueue.empty() || !isLoggingActive;
+                });
+
+            if (logQueue.empty() && !isLoggingActive) {
+                break;
+            }
+
+            // 큐 스왑 (Lock holding time 최소화)
+            std::queue<std::string> tempQueue;
+            tempQueue.swap(logQueue);
+            lock.unlock();
+
+            // 파일 쓰기
+            if (logFile.is_open()) {
+                while (!tempQueue.empty()) {
+                    logFile << tempQueue.front();
+                    tempQueue.pop();
+                }
+            }
+        }
+    }
 };
 
 // -----------------------------
