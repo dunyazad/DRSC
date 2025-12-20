@@ -106,6 +106,8 @@ public:
 };
 
 int main() {
+    printf("[Dummy Player]\n");
+
     DroneRacingClient client;
     client.StartBeaconListener();
 

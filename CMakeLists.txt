@@ -19,4 +19,5 @@ add_subdirectory(src/libRxTx)
 add_subdirectory(src/appRxTx)
 add_subdirectory(src/DroneRacingServer)
 add_subdirectory(src/DroneRacingClient)
-
+add_subdirectory(src/DroneRacingClient_Recording)
+add_subdirectory(src/DroneRacingClient_Replaying)
