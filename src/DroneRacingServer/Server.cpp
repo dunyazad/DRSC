@@ -19,18 +19,21 @@
 #include <fstream>
 #include <queue>
 #include <condition_variable>
+#include <functional>
 
 using namespace libRxTx;
 
 class DroneRacingServer;
 
-struct PlayerTransform {
+struct PlayerTransform
+{
     float x, y, z;
     float roll, pitch, yaw;
 };
 
-// 세션 타입 정의
-enum class SessionType {
+// Session Type Definition
+enum class SessionType
+{
     Observer,
     Player,
     Recorder,
@@ -38,9 +41,10 @@ enum class SessionType {
 };
 
 // -----------------------------
-// Session 구조체
+// Session Structure
 // -----------------------------
-struct Session {
+struct Session
+{
     SessionType type = SessionType::Player;
     std::string clientId;
     std::string playerName;
@@ -52,33 +56,57 @@ struct Session {
 #define MAX_PLAYERS_PER_MATCH 2
 
 // -----------------------------
-// Match 클래스
+// Match Class
 // -----------------------------
-class Match : public std::enable_shared_from_this<Match> {
+class Match : public std::enable_shared_from_this<Match>
+{
 public:
-    explicit Match(int id) : matchId(id) {}
+    explicit Match(int id) : matchId(id)
+    {
+    }
 
-    ~Match() {
+    ~Match()
+    {
         Stop();
-        if (thread.joinable()) {
+
+        if (thread.joinable())
+        {
             thread.join();
         }
+
+        {
+            std::lock_guard<std::mutex> lock(logMutex);
+            isLoggingActive = false;
+        }
+        logCv.notify_all();
+
+        if (logThread.joinable())
+        {
+            logThread.join();
+        }
+
+        if (logFile.is_open())
+        {
+            logFile.close();
+        }
+
         std::cout << "[Match " << matchId << "] Destructor finished." << std::endl;
     }
 
-    void AddPlayer(std::shared_ptr<Session> s) {
+    void AddPlayer(std::shared_ptr<Session> s)
+    {
         std::lock_guard<std::mutex> lock(playerMutex);
         players.push_back(s);
         std::cout << "[Match " << matchId << "] Added Participant: "
             << (s->playerName.empty() ? "(unknown)" : s->playerName)
             << " (" << s->clientId << ") Type: " << (int)s->type << std::endl;
 
-        // 플레이어/리플레이어는 위치 정보 공간 확보
         playerTransforms.push_back({ 0,0,0,0,0,0 });
         playerScores.push_back(0);
     }
 
-    void AddObserver(std::shared_ptr<Session> s) {
+    void AddObserver(std::shared_ptr<Session> s)
+    {
         std::lock_guard<std::mutex> lock(observerMutex);
         observers.push_back(s);
         std::cout << "[Match " << matchId << "] Added Viewer: "
@@ -86,25 +114,106 @@ public:
             << " (" << s->clientId << ") Type: " << (int)s->type << std::endl;
     }
 
-    void Start() {
-        if (running) return;
+    void RemoveSession(const std::string& clientId)
+    {
+        bool shouldStop = false;
+
+        {
+            std::lock_guard<std::mutex> lock(playerMutex);
+            int removeIndex = -1;
+            for (size_t i = 0; i < players.size(); ++i)
+            {
+                if (players[i]->clientId == clientId)
+                {
+                    removeIndex = (int)i;
+                    break;
+                }
+            }
+
+            if (removeIndex != -1)
+            {
+                players.erase(players.begin() + removeIndex);
+                if (removeIndex < (int)playerTransforms.size())
+                {
+                    playerTransforms.erase(playerTransforms.begin() + removeIndex);
+                }
+                if (removeIndex < (int)playerScores.size())
+                {
+                    playerScores.erase(playerScores.begin() + removeIndex);
+                }
+
+                std::cout << "[Match " << matchId << "] Removed Player: " << clientId << std::endl;
+
+                // [Fix] Check win condition
+                if (raceStarted && players.size() == 1)
+                {
+                    std::cout << "[Match " << matchId << "] Only one player remaining. Declaring winner." << std::endl;
+                    PropagatePlayerWin(0);
+                    shouldStop = true; // Mark to stop later
+                }
+            }
+        } // playerMutex is released here
+
+        {
+            std::lock_guard<std::mutex> lock(observerMutex);
+            auto it = std::remove_if(observers.begin(), observers.end(),
+                [&](const std::shared_ptr<Session>& s) { return s->clientId == clientId; });
+            if (it != observers.end())
+            {
+                observers.erase(it, observers.end());
+                std::cout << "[Match " << matchId << "] Removed Observer: " << clientId << std::endl;
+            }
+        }
+
+        // Call Stop() outside the lock to prevent Deadlock
+        if (shouldStop)
+        {
+            Stop();
+        }
+    }
+
+    void Start()
+    {
+        if (running)
+        {
+            return;
+        }
+
+        // [Fix] Reset state for restart
         running = true;
+        raceStarted = false;
+        countdown = 5;
 
         std::cout << "[Match " << matchId << "] Race started with "
             << players.size() << " players." << std::endl;
 
-        std::string filename = "match_" + std::to_string(matchId) + "_log.txt";
+        // [Fix] Add timestamp to filename to prevent overwriting
+        auto now = std::chrono::system_clock::now();
+        std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ssFilename;
+        ssFilename << "match_" << matchId << "_"
+            << std::put_time(std::localtime(&now_time), "%Y%m%d_%H%M%S")
+            << "_log.txt";
+
+        std::string filename = ssFilename.str();
+
         logFile.open(filename, std::ios::out | std::ios::trunc);
-        if (logFile.is_open()) {
+        if (logFile.is_open())
+        {
             std::cout << "[Match " << matchId << "] Logging started: " << filename << std::endl;
         }
 
-        // 로깅 쓰레드 시작
         isLoggingActive = true;
-        if (logThread.joinable()) logThread.join();
+        if (logThread.joinable())
+        {
+            logThread.join();
+        }
         logThread = std::thread(&Match::LogWorker, this);
 
-        if (thread.joinable()) thread.join();
+        if (thread.joinable())
+        {
+            thread.join();
+        }
 
         auto self = shared_from_this();
         thread = std::thread([self]() { self->Loop(); });
@@ -117,7 +226,7 @@ public:
         std::chrono::nanoseconds ellapsedTimeCountSending(0);
 
         const long long TIME_THRESHOLD_COUNTDOWN = 1000000000;
-        const long long TIME_THRESHOLD_SENDING = 16000000; // approx 60Hz
+        const long long TIME_THRESHOLD_SENDING = 16000000;
 
         while (running)
         {
@@ -135,7 +244,6 @@ public:
 
                 if (ellapsedTimeCountSending.count() >= TIME_THRESHOLD_SENDING)
                 {
-                    // 1. 위치 업데이트 패킷 생성
                     {
                         std::stringstream ssMsg;
                         ssMsg << std::fixed << std::setprecision(6);
@@ -153,7 +261,10 @@ public:
                                     << transform.x << "," << transform.y << "," << transform.z << ","
                                     << transform.roll << "," << transform.pitch << "," << transform.yaw;
 
-                                if (i != pSize - 1) ssMsg << "/";
+                                if (i != pSize - 1)
+                                {
+                                    ssMsg << "/";
+                                }
                             }
                             hasData = (pSize > 0);
                         }
@@ -161,8 +272,6 @@ public:
                         if (hasData)
                         {
                             std::string msg = ssMsg.str();
-
-                            // 로깅
                             {
                                 auto raceCurrentTime = std::chrono::steady_clock::now();
                                 long long raceDelta = std::chrono::duration_cast<std::chrono::milliseconds>(raceCurrentTime - startTime).count();
@@ -171,47 +280,46 @@ public:
                                 EnqueueLog(ssLog.str());
                             }
 
-                            // 브로드캐스팅 (Players + Observers)
-                            auto broadcast = [&](const std::string& m) {
-                                std::lock_guard<std::mutex> pLock(playerMutex);
-                                for (auto& p : players) if (p && sendCallback) sendCallback(m, p->clientId);
-                                std::lock_guard<std::mutex> oLock(observerMutex);
-                                for (auto& o : observers) if (o && sendCallback) sendCallback(m, o->clientId);
+                            auto broadcast = [&](const std::string& m)
+                                {
+                                    std::lock_guard<std::mutex> pLock(playerMutex);
+                                    for (auto& p : players)
+                                    {
+                                        if (p && sendCallback) sendCallback(m, p->clientId);
+                                    }
+                                    std::lock_guard<std::mutex> oLock(observerMutex);
+                                    for (auto& o : observers)
+                                    {
+                                        if (o && sendCallback) sendCallback(m, o->clientId);
+                                    }
                                 };
                             broadcast(msg);
                         }
                     }
-
-                    // 2. 랭킹/점수 업데이트 패킷 생성 (생략 가능하나 원본 유지)
-                    {
-                        // (점수 기반 랭킹 로직 - 기존과 동일)
-                        // ...
-                    }
-
                     ellapsedTimeCountSending -= std::chrono::nanoseconds(TIME_THRESHOLD_SENDING);
                 }
             }
 
-            // 카운트다운 로직
             if (ellapsedTimeCountDown.count() >= TIME_THRESHOLD_COUNTDOWN)
             {
                 ellapsedTimeCountDown -= std::chrono::nanoseconds(TIME_THRESHOLD_COUNTDOWN);
-
                 if (countdown >= 0)
                 {
-                    std::cout << "[Match " << matchId << "] Countdown: " << countdown << "\n";
                     std::string msg = "COUNT_DOWN|" + std::to_string(countdown);
-
-                    // Broadcast
-                    {
-                        std::lock_guard<std::mutex> lock(playerMutex);
-                        for (auto& p : players) if (p && sendCallback) sendCallback(msg, p->clientId);
-                    }
-                    {
-                        std::lock_guard<std::mutex> lock(observerMutex);
-                        for (auto& p : observers) if (p && sendCallback) sendCallback(msg, p->clientId);
-                    }
-
+                    auto broadcast = [&](const std::string& m)
+                        {
+                            std::lock_guard<std::mutex> pLock(playerMutex);
+                            for (auto& p : players)
+                            {
+                                if (p && sendCallback) sendCallback(m, p->clientId);
+                            }
+                            std::lock_guard<std::mutex> oLock(observerMutex);
+                            for (auto& o : observers)
+                            {
+                                if (o && sendCallback) sendCallback(m, o->clientId);
+                            }
+                        };
+                    broadcast(msg);
                     countdown--;
                 }
                 else if (countdown == -1)
@@ -221,46 +329,40 @@ public:
                     ellapsedTimeCountSending = std::chrono::nanoseconds(0);
 
                     std::stringstream ss;
-                    ss << "START_RACE|" << players.size();
-                    std::string msg = ss.str();
-
-                    // Broadcast
                     {
                         std::lock_guard<std::mutex> lock(playerMutex);
-                        for (auto& p : players) if (p && sendCallback) sendCallback(msg, p->clientId);
+                        ss << "START_RACE|" << players.size();
                     }
-                    {
-                        std::lock_guard<std::mutex> lock(observerMutex);
-                        for (auto& p : observers) if (p && sendCallback) sendCallback(msg, p->clientId);
-                    }
+                    std::string msg = ss.str();
+                    auto broadcast = [&](const std::string& m)
+                        {
+                            std::lock_guard<std::mutex> pLock(playerMutex);
+                            for (auto& p : players)
+                            {
+                                if (p && sendCallback) sendCallback(m, p->clientId);
+                            }
+                            std::lock_guard<std::mutex> oLock(observerMutex);
+                            for (auto& o : observers)
+                            {
+                                if (o && sendCallback) sendCallback(m, o->clientId);
+                            }
+                        };
+                    broadcast(msg);
+
                     countdown--;
-                }
-                else if (countdown == -2)
-                {
-                    // Play Time 전송 로직
-                    auto raceDelta = std::chrono::steady_clock::now() - startTime;
-                    playTime = std::chrono::duration_cast<std::chrono::milliseconds>(raceDelta).count();
-                    // ... (Broadcast PLAY_TIME)
                 }
             }
 
-            // 자동 종료 체크 (플레이어가 1명 이하이면 종료 등 정책에 따라)
             int playerCount = 0;
             {
                 std::lock_guard<std::mutex> lock(playerMutex);
                 playerCount = (int)players.size();
             }
-            if (playerCount < MAX_PLAYERS_PER_MATCH && running && countdown < 0)
-            {
-                if (playerCount == 1) {
-                    std::lock_guard<std::mutex> lock(playerMutex);
-                    if (!players.empty() && players[0]) {
-                        // 현재 남아있는 0번 인덱스 플레이어에게 승리 판정
-                        // 주의: players 벡터에서 나간 사람이 지워졌으므로, 남은 사람은 0번 인덱스로 당겨짐
-                        PropagatePlayerWin(0);
-                    }
-                }
 
+            // [Fix] Only stop if NO players are left.
+            // Previously: (playerCount < MAX_PLAYERS_PER_MATCH) caused stop on single disconnect.
+            if (playerCount == 0 && running && countdown < 0)
+            {
                 std::cout << "[Match " << matchId << "] Auto-stop: No players left.\n";
                 running = false;
             }
@@ -268,67 +370,172 @@ public:
         std::cout << "[Match " << matchId << "] Loop exited.\n";
     }
 
-    void Stop() {
-        if (!running.exchange(false)) return; // 이미 멈춤
+    void Stop()
+    {
+        if (!running.exchange(false))
+        {
+            return;
+        }
 
         std::cout << "[Match " << matchId << "] Stopping..." << std::endl;
 
-        // 종료 메시지 전송
-        auto broadcast = [&](const std::string& m) {
-            std::lock_guard<std::mutex> pLock(playerMutex);
-            for (auto& p : players) if (p && sendCallback) sendCallback(m, p->clientId);
-            std::lock_guard<std::mutex> oLock(observerMutex);
-            for (auto& o : observers) if (o && sendCallback) sendCallback(m, o->clientId);
+        auto broadcast = [&](const std::string& m)
+            {
+                std::lock_guard<std::mutex> pLock(playerMutex);
+                for (auto& p : players)
+                {
+                    if (p && sendCallback) sendCallback(m, p->clientId);
+                }
+                std::lock_guard<std::mutex> oLock(observerMutex);
+                for (auto& o : observers)
+                {
+                    if (o && sendCallback) sendCallback(m, o->clientId);
+                }
             };
         broadcast("RACE_FINISHED|");
 
-        // 로깅 종료
         {
             std::lock_guard<std::mutex> lock(logMutex);
             isLoggingActive = false;
         }
         logCv.notify_all();
-        if (logThread.joinable()) logThread.join();
-        if (logFile.is_open()) logFile.close();
+
+        if (logThread.joinable())
+        {
+            logThread.join();
+        }
+        if (logFile.is_open())
+        {
+            logFile.close();
+        }
     }
 
-    bool IsRunning() const { return running; }
-    bool IsFull() const {
+    bool IsRunning() const
+    {
+        return running;
+    }
+
+    bool IsFull() const
+    {
         std::lock_guard<std::mutex> lock(playerMutex);
         return players.size() >= MAX_PLAYERS_PER_MATCH;
     }
-    bool IsReadyToStart() const {
+
+    bool IsReadyToStart() const
+    {
         std::lock_guard<std::mutex> lock(playerMutex);
-        if (players.size() < MAX_PLAYERS_PER_MATCH) return false;
-        for (auto& p : players) {
-            if (!p->ready) return false;
+        if (players.size() < MAX_PLAYERS_PER_MATCH)
+        {
+            return false;
+        }
+
+        for (auto& p : players)
+        {
+            if (!p->ready)
+            {
+                return false;
+            }
         }
         return true;
     }
-    int GetID() const { return matchId; }
 
-    void SetPlayerTransform(int playerIndex, const PlayerTransform& transform) {
+    int GetID() const
+    {
+        return matchId;
+    }
+
+    int GetPlayerIndex(const std::shared_ptr<Session>& targetSession)
+    {
         std::lock_guard<std::mutex> lock(playerMutex);
-        if (playerIndex >= 0 && playerIndex < playerTransforms.size()) {
+        for (size_t i = 0; i < players.size(); ++i)
+        {
+            if (players[i] == targetSession)
+            {
+                return (int)i;
+            }
+        }
+        return -1;
+    }
+
+    void SetPlayerTransform(int playerIndex, const PlayerTransform& transform)
+    {
+        std::lock_guard<std::mutex> lock(playerMutex);
+        if (playerIndex >= 0 && playerIndex < (int)playerTransforms.size())
+        {
             playerTransforms[playerIndex] = transform;
         }
     }
-    void SetPlayerScore(int playerIndex, unsigned int score) {
-        std::lock_guard<std::mutex> lock(playerMutex);
-        if (playerIndex >= 0 && playerIndex < playerScores.size()) {
-            playerScores[playerIndex] = score;
+
+    void SetPlayerScore(int playerIndex, unsigned int score)
+    {
+        bool shouldStop = false;
+        {
+            std::lock_guard<std::mutex> lock(playerMutex);
+            if (playerIndex >= 0 && playerIndex < (int)playerScores.size())
+            {
+                playerScores[playerIndex] = score;
+            }
+            if (26 <= score)
+            {
+                PropagatePlayerWin(playerIndex);
+                shouldStop = true; // Mark to stop later
+            }
+        } // Mutex is released here
+
+        // Call Stop() outside the lock to prevent Deadlock
+        if (shouldStop)
+        {
+            Stop();
         }
-        if (26 <= score) PropagatePlayerWin(playerIndex);
     }
-    void PropagatePlayerWin(int winnerIndex) {
+
+    void PropagatePlayerWin(int winnerIndex)
+    {
         raceStarted = false;
-        std::stringstream ss; ss << "PLAYER_WIN|" << winnerIndex;
-        // Broadcast...
+        std::stringstream ss;
+        ss << "PLAYER_WIN|" << winnerIndex;
+        std::string msg = ss.str();
+
+        // [Fix] REMOVED lock_guard here.
+        // The caller already holds the lock, so we can iterate safely.
+
+        // 1. Send to Players
+        for (auto& p : players)
+        {
+            if (p && sendCallback) sendCallback(msg, p->clientId);
+        }
+
+        // 2. Send to Observers (Observer lock is separate, so we lock it here)
+        {
+            std::lock_guard<std::mutex> oLock(observerMutex);
+            for (auto& o : observers)
+            {
+                if (o && sendCallback) sendCallback(msg, o->clientId);
+            }
+        }
+
+        // [Fix] REMOVED Stop() call here.
+        // Stop() must be called by the caller AFTER releasing the mutex.
     }
-    void PropagatePlayerCrashed(int crashedPlayerIndex) {
+
+    void PropagatePlayerCrashed(int crashedPlayerIndex)
+    {
         raceStarted = false;
-        std::stringstream ss; ss << "PLAYER_CRASHED|" << crashedPlayerIndex;
-        // Broadcast...
+        std::stringstream ss;
+        ss << "PLAYER_CRASHED|" << crashedPlayerIndex;
+        std::string msg = ss.str();
+
+        std::lock_guard<std::mutex> pLock(playerMutex);
+        for (auto& p : players)
+        {
+            if (p && sendCallback) sendCallback(msg, p->clientId);
+        }
+        std::lock_guard<std::mutex> oLock(observerMutex);
+        for (auto& o : observers)
+        {
+            if (o && sendCallback) sendCallback(msg, o->clientId);
+        }
+
         Stop();
     }
 
@@ -344,10 +551,10 @@ private:
     bool raceStarted = false;
 
     mutable std::mutex playerMutex;
-    std::vector<std::shared_ptr<Session>> players; // Player + Replayer
+    std::vector<std::shared_ptr<Session>> players;
 
     mutable std::mutex observerMutex;
-    std::vector<std::shared_ptr<Session>> observers; // Observer + Recorder
+    std::vector<std::shared_ptr<Session>> observers;
 
     std::thread thread;
     std::vector<PlayerTransform> playerTransforms;
@@ -360,24 +567,38 @@ private:
     std::condition_variable logCv;
     bool isLoggingActive = false;
 
-    void EnqueueLog(const std::string& message) {
+    void EnqueueLog(const std::string& message)
+    {
         {
             std::lock_guard<std::mutex> lock(logMutex);
-            if (!isLoggingActive) return;
+            if (!isLoggingActive)
+            {
+                return;
+            }
             logQueue.push(message);
         }
         logCv.notify_one();
     }
-    void LogWorker() {
-        while (true) {
+
+    void LogWorker()
+    {
+        while (true)
+        {
             std::unique_lock<std::mutex> lock(logMutex);
             logCv.wait(lock, [this]() { return !logQueue.empty() || !isLoggingActive; });
-            if (logQueue.empty() && !isLoggingActive) break;
+            if (logQueue.empty() && !isLoggingActive)
+            {
+                break;
+            }
+
             std::queue<std::string> tempQueue;
             tempQueue.swap(logQueue);
             lock.unlock();
-            if (logFile.is_open()) {
-                while (!tempQueue.empty()) {
+
+            if (logFile.is_open())
+            {
+                while (!tempQueue.empty())
+                {
                     logFile << tempQueue.front();
                     tempQueue.pop();
                 }
@@ -387,24 +608,42 @@ private:
 };
 
 // -----------------------------
-// DroneRacingServer
+// DroneRacingServer (Revised)
 // -----------------------------
-class DroneRacingServer {
+class DroneRacingServer
+{
 public:
-    DroneRacingServer() : beaconUDP(Protocol::UDP), receptionTCP(Protocol::TCP) {}
+    DroneRacingServer() : beaconUDP(Protocol::UDP), receptionTCP(Protocol::TCP)
+    {
+    }
 
-    void Start() {
+    void Start()
+    {
         beaconUDP.Init();
         beaconUDP.SetMode(UdpMode::Broadcast);
         beaconUDP.Bind(5000, beaconUDP.GetLocalIP());
         StartBeacon();
         StartTCP();
     }
-    void Stop() {
-        beaconUDP.Stop();
+
+    void Stop()
+    {
+        // 1. Stop Beacon Thread first
+        beaconRunning = false;
+        if (beaconThread.joinable())
+        {
+            beaconThread.join();
+        }
+        beaconUDP.Stop(); // Stop socket after thread finishes
+
+        // 2. Stop TCP
         receptionTCP.Stop();
     }
-    ~DroneRacingServer() { Stop(); }
+
+    ~DroneRacingServer()
+    {
+        Stop();
+    }
 
 private:
     RxTx beaconUDP;
@@ -415,134 +654,207 @@ private:
     std::vector<std::shared_ptr<Match>> matches;
     int nextMatchId = 1;
 
-    void StartBeacon() {
+    // Added: Members for safe thread management
+    std::thread beaconThread;
+    std::atomic<bool> beaconRunning{ false };
+
+    void StartBeacon()
+    {
         beaconUDP.Start();
-        std::thread([this]() {
-            auto ip = beaconUDP.GetLocalIP();
-            while (true) {
-                beaconUDP.SendToAll("DRONE_RACING_SERVER_IP:" + ip, 5000);
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-            }).detach();
+        beaconRunning = true;
+
+        // [Fix] Store thread in member variable instead of detaching
+        beaconThread = std::thread([this]()
+            {
+                auto ip = beaconUDP.GetLocalIP();
+                while (beaconRunning)
+                {
+                    beaconUDP.SendToAll("DRONE_RACING_SERVER_IP:" + ip, 5000);
+
+                    // Sleep with check to allow faster shutdown
+                    for (int i = 0; i < 10; ++i)
+                    {
+                        if (!beaconRunning)
+                        {
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                }
+            });
     }
 
-    void StartTCP() {
+    void StartTCP()
+    {
         receptionTCP.Init();
         receptionTCP.Bind(6000);
         receptionTCP.Listen();
 
-        receptionTCP.OnConnect([this](const std::string& ip) {
-            std::lock_guard<std::mutex> lock(mtx);
-            auto session = std::make_shared<Session>();
-            session->ip = ip;
-            std::ostringstream oss; oss << "C" << nextClientId++;
-            session->clientId = oss.str();
-            sessions[session->clientId] = session;
-            receptionTCP.MapClientIpToId(ip, session->clientId);
-            receptionTCP.RegisterClientSocket(session->clientId, ip);
-            std::cout << "[TCP] Connected: " << ip << " -> ClientID=" << session->clientId << std::endl;
-            return "CLIENT_ID|" + session->clientId;
+        receptionTCP.OnConnect([this](const std::string& ip)
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                auto session = std::make_shared<Session>();
+                session->ip = ip;
+                std::ostringstream oss; oss << "C" << nextClientId++;
+                session->clientId = oss.str();
+                sessions[session->clientId] = session;
+                receptionTCP.MapClientIpToId(ip, session->clientId);
+                receptionTCP.RegisterClientSocket(session->clientId, ip);
+                std::cout << "[TCP] Connected: " << ip << " -> ClientID=" << session->clientId << std::endl;
+                return "CLIENT_ID|" + session->clientId;
             });
 
-        receptionTCP.OnReceive([this](const std::string& msg, const std::string& clientId) {
-            std::lock_guard<std::mutex> lock(mtx);
-            auto session = FindSessionById(clientId);
-            if (!session) return;
-
-            if (msg.rfind("JOIN|", 0) == 0) {
-                session->playerName = clientId;
-                std::istringstream iss(msg.substr(5));
-                std::string typeStr;
-                iss >> typeStr;
-                std::transform(typeStr.begin(), typeStr.end(), typeStr.begin(), ::tolower);
-
-                if (typeStr == "player") session->type = SessionType::Player;
-                else if (typeStr == "replayer") session->type = SessionType::Replayer;
-                else if (typeStr == "recorder") session->type = SessionType::Recorder;
-                else session->type = SessionType::Player;
-
-                AssignToMatch(session);
-
-                std::stringstream ss;
-                ss << "JOINED_MATCH|" << session->currentMatch.lock()->GetID();
-                receptionTCP.SendToClient(clientId, ss.str());
-
-                // Player/Replayer에게만 인덱스 전송
-                if (session->type == SessionType::Player || session->type == SessionType::Replayer) {
-                    std::stringstream ssIdx;
-                    ssIdx << "PLAYER_INDEX|" << session->currentMatch.lock()->players.size() - 1;
-                    receptionTCP.SendToClient(clientId, ssIdx.str());
+        receptionTCP.OnReceive([this](const std::string& msg, const std::string& clientId)
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                auto session = FindSessionById(clientId);
+                if (!session)
+                {
+                    return;
                 }
-            }
-            else if (msg.rfind("READY|", 0) == 0) {
-                session->ready = true;
-                std::cout << "[TCP] " << session->clientId << " is READY" << std::endl;
-                auto match = session->currentMatch.lock();
-                if (match && !match->IsRunning() && match->IsReadyToStart()) {
-                    match->Start();
+
+                if (msg.rfind("JOIN|", 0) == 0)
+                {
+                    session->playerName = clientId;
+                    std::istringstream iss(msg.substr(5));
+                    std::string typeStr;
+                    iss >> typeStr;
+                    std::transform(typeStr.begin(), typeStr.end(), typeStr.begin(), ::tolower);
+
+                    if (typeStr == "player")
+                    {
+                        session->type = SessionType::Player;
+						printf("Player connected: %s\n", clientId.c_str());
+                    }
+                    else if (typeStr == "observer")
+                    {
+                        session->type = SessionType::Observer;
+						printf("Observer connected: %s\n", clientId.c_str());
+                    }
+                    else if (typeStr == "replayer")
+                    {
+                        session->type = SessionType::Replayer;
+						printf("Replayer connected: %s\n", clientId.c_str());
+                    }
+                    else if (typeStr == "recorder")
+                    {
+                        session->type = SessionType::Recorder;
+						printf("Recorder connected: %s\n", clientId.c_str());
+                    }
+                    else if (typeStr == "bot")
+                    {
+                        session->type = SessionType::Player;
+						printf("Bot connected: %s\n", clientId.c_str());
+                    }
+                    else
+                    {
+                        session->type = SessionType::Player;
+						printf("Unknown type, defaulting to Player: %s\n", clientId.c_str());
+                    }
+
+                    AssignToMatch(session);
+
+                    auto match = session->currentMatch.lock();
+                    if (match)
+                    {
+                        std::stringstream ss;
+                        ss << "JOINED_MATCH|" << match->GetID();
+                        receptionTCP.SendToClient(clientId, ss.str());
+
+                        if (session->type == SessionType::Player || session->type == SessionType::Replayer)
+                        {
+                            int idx = match->GetPlayerIndex(session);
+                            std::stringstream ssIdx;
+                            ssIdx << "PLAYER_INDEX|" << idx;
+                            receptionTCP.SendToClient(clientId, ssIdx.str());
+                        }
+                    }
                 }
-            }
-            else if (msg.rfind("PLAYER_TRANSFORM|", 0) == 0) {
-                auto match = session->currentMatch.lock();
-                if (match) {
-                    std::istringstream iss(msg.substr(17));
-                    int playerIndex = -1;
-                    PlayerTransform transform;
-                    char sep;
-                    iss >> playerIndex >> sep
-                        >> transform.x >> sep >> transform.y >> sep >> transform.z >> sep
-                        >> transform.roll >> sep >> transform.pitch >> sep >> transform.yaw;
-                    match->SetPlayerTransform(playerIndex, transform);
+                else if (msg.rfind("READY|", 0) == 0)
+                {
+                    session->ready = true;
+                    std::cout << "[TCP] " << session->clientId << " is READY" << std::endl;
+                    auto match = session->currentMatch.lock();
+                    if (match && !match->IsRunning() && match->IsReadyToStart())
+                    {
+                        match->Start();
+                    }
                 }
-            }
-            // ... (SCORE, CRASHED 처리 등 생략 가능하나 원본 구조 유지)
+                else if (msg.rfind("PLAYER_TRANSFORM|", 0) == 0)
+                {
+                    auto match = session->currentMatch.lock();
+                    if (match)
+                    {
+                        int realIndex = match->GetPlayerIndex(session);
+                        if (realIndex != -1)
+                        {
+                            std::istringstream iss(msg.substr(17));
+                            int clientSentIndex = -1;
+                            PlayerTransform transform;
+                            char sep;
+                            iss >> clientSentIndex >> sep
+                                >> transform.x >> sep >> transform.y >> sep >> transform.z >> sep
+                                >> transform.roll >> sep >> transform.pitch >> sep >> transform.yaw;
+
+                            match->SetPlayerTransform(realIndex, transform);
+                        }
+                    }
+                }
             });
 
-        receptionTCP.OnDisconnect([this](const std::string& clientId) {
-            std::lock_guard<std::mutex> lock(mtx);
-            auto session = FindSessionById(clientId);
-            if (!session) return;
-
-            sessions.erase(clientId);
-            auto match = session->currentMatch.lock();
-            if (!match) return;
-
-            // 매치에서 세션 제거
+        receptionTCP.OnDisconnect([this](const std::string& clientId)
             {
-                std::lock_guard<std::mutex> pLock(match->playerMutex);
-                auto& vec = match->players;
-                vec.erase(std::remove_if(vec.begin(), vec.end(), [&](auto& s) { return s->clientId == clientId; }), vec.end());
-            }
-            {
-                std::lock_guard<std::mutex> oLock(match->observerMutex);
-                auto& vec = match->observers;
-                vec.erase(std::remove_if(vec.begin(), vec.end(), [&](auto& s) { return s->clientId == clientId; }), vec.end());
-            }
+                std::lock_guard<std::mutex> lock(mtx);
+                auto session = FindSessionById(clientId);
+                if (!session)
+                {
+                    return;
+                }
 
-            // 매치가 완전히 비었으면 삭제
-            {
-                std::lock_guard<std::mutex> pLock(match->playerMutex);
-                std::lock_guard<std::mutex> oLock(match->observerMutex);
-                if (match->players.empty() && match->observers.empty() && !match->IsRunning()) {
+                sessions.erase(clientId);
+                auto match = session->currentMatch.lock();
+                if (!match)
+                {
+                    return;
+                }
+
+                match->RemoveSession(clientId);
+
+                bool isEmpty = false;
+                if (!match->IsRunning())
+                {
+                    std::lock_guard<std::mutex> pLock(match->playerMutex);
+                    std::lock_guard<std::mutex> oLock(match->observerMutex);
+                    if (match->players.empty() && match->observers.empty())
+                    {
+                        isEmpty = true;
+                    }
+                }
+
+                if (isEmpty)
+                {
                     matches.erase(std::remove_if(matches.begin(), matches.end(),
                         [&](auto& m) { return m == match; }), matches.end());
                     std::cout << "[Server] Cleaned up match " << match->GetID() << std::endl;
                 }
-            }
             });
 
         receptionTCP.Start();
     }
 
-    std::shared_ptr<Session> FindSessionById(const std::string& id) {
+    std::shared_ptr<Session> FindSessionById(const std::string& id)
+    {
         auto it = sessions.find(id);
         return (it != sessions.end()) ? it->second : nullptr;
     }
 
-    void AssignToMatch(std::shared_ptr<Session> s) {
-        if (s->type == SessionType::Player || s->type == SessionType::Replayer) {
+    void AssignToMatch(std::shared_ptr<Session> s)
+    {
+        if (s->type == SessionType::Player || s->type == SessionType::Replayer)
+        {
             auto openMatch = FindOpenMatch();
-            if (!openMatch) {
+            if (!openMatch)
+            {
                 openMatch = std::make_shared<Match>(nextMatchId++);
                 matches.push_back(openMatch);
                 openMatch->sendCallback = [this](const std::string& msg, const std::string& cid) { receptionTCP.SendToClient(cid, msg); };
@@ -550,11 +862,16 @@ private:
             }
             s->currentMatch = openMatch;
             openMatch->AddPlayer(s);
-            if (openMatch->IsReadyToStart()) openMatch->Start();
+            if (openMatch->IsReadyToStart())
+            {
+                openMatch->Start();
+            }
         }
-        else {
+        else
+        {
             auto firstMatch = FindFirstMatch();
-            if (!firstMatch) {
+            if (!firstMatch)
+            {
                 firstMatch = std::make_shared<Match>(nextMatchId++);
                 matches.push_back(firstMatch);
                 firstMatch->sendCallback = [this](const std::string& msg, const std::string& cid) { receptionTCP.SendToClient(cid, msg); };
@@ -565,17 +882,24 @@ private:
         }
     }
 
-    std::shared_ptr<Match> FindOpenMatch() {
-        for (auto& m : matches) if (!m->IsFull() && !m->IsRunning()) return m;
+    std::shared_ptr<Match> FindOpenMatch()
+    {
+        for (auto& m : matches)
+        {
+            if (!m->IsFull() && !m->IsRunning()) return m;
+        }
         return nullptr;
     }
-    std::shared_ptr<Match> FindFirstMatch() {
+
+    std::shared_ptr<Match> FindFirstMatch()
+    {
         return matches.empty() ? nullptr : matches.front();
     }
 };
 
-int main() {
-	printf("[Server]\n");
+int main()
+{
+    printf("[Server]\n");
 
     DroneRacingServer server;
     server.Start();
